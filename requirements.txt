@@ -1,0 +1,33 @@
+# ===== Core data science (M0 profile_dataset) =====
+pandas>=2.2.0
+numpy>=1.26.0
+scikit-learn>=1.4.0
+
+# ===== LangGraph / LangChain (agent framework, M1-M4) =====
+langgraph>=0.2.0
+langchain>=0.3.0
+langchain-core>=0.3.0
+langchain-community>=0.3.0
+langchain-ollama>=0.1.0
+
+# ===== Ollama client (local LLM: llama3.1:8b, qwen2.5-coder:7b) =====
+ollama>=0.4.0
+
+# ===== Backend API (M7 FastAPI + Pydantic) =====
+fastapi>=0.110.0
+uvicorn[standard]>=0.30.0
+pydantic>=2.7.0
+pydantic-settings>=2.3.0   # loads .env (config/secrets never in code)
+
+# ===== Database: Postgres local (M5 persistence, M7 API) =====
+psycopg[binary]>=3.1.0     # driver + langgraph Postgres checkpointer
+
+# ===== UI (M7 Streamlit) =====
+streamlit>=1.35.0
+
+# ===== Tracing (M8 LangSmith or Langfuse) =====
+langsmith>=0.1.0
+
+# ===== Testing (tests/ for each check function) =====
+pytest>=8.0.0
+pytest-asyncio>=0.23.0
