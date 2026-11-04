@@ -21,6 +21,7 @@ pydantic-settings>=2.3.0   # loads .env (config/secrets never in code)
 
 # ===== Database: Postgres local (M5 persistence, M7 API) =====
 psycopg[binary]>=3.1.0     # driver + langgraph Postgres checkpointer
+langgraph-checkpoint-postgres>=3.0.0   # official Postgres checkpointer (M5)
 
 # ===== UI (M7 Streamlit) =====
 streamlit>=1.35.0

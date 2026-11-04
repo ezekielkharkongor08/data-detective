@@ -44,11 +44,17 @@ def load_csv_node(state: GraphState) -> GraphState:
     }
 
 
+def _finding_to_dict(f: Finding) -> dict:
+    """Convert a :class:`Finding` to a plain dict for checkpointer serialization."""
+    return f.model_dump(mode="json")
+
+
 def _wrap_check(check_fn: Callable[..., list[Finding]], state: GraphState) -> dict:
     """Run a check function safely so one failure can't crash the parallel step.
 
-    Returns a dict with a ``findings`` key containing either the check's
-    findings or a single error finding if the check raised.
+    Returns a dict with a ``findings`` key containing the check's findings as
+    plain dicts (serializable by the LangGraph checkpointer) or a single error
+    finding if the check raised.
     """
     csv_path = state.get("csv_path")
     target_column = state.get("target_column")
@@ -65,7 +71,7 @@ def _wrap_check(check_fn: Callable[..., list[Finding]], state: GraphState) -> di
                 confidence=0.0,
             )
         ]
-    return {"findings": findings}
+    return {"findings": [_finding_to_dict(f) for f in findings]}
 
 
 def make_check_node(check_fn: Callable[..., list[Finding]]) -> Callable[[GraphState], dict]:
@@ -102,13 +108,13 @@ def router_node(state: GraphState) -> GraphState:
     suspect_columns: list[str] = []
     for f in findings:
         # ID-like columns are the most common leakage vector.
-        if f.check_name == "id_like":
-            for col in f.affected_columns:
+        if f["check_name"] == "id_like":
+            for col in f["affected_columns"]:
                 if col != target_column and col not in suspect_columns:
                     suspect_columns.append(col)
         # A text column that is mostly numeric may be target encoded as text.
-        elif f.check_name == "schema":
-            for col in f.affected_columns:
+        elif f["check_name"] == "schema":
+            for col in f["affected_columns"]:
                 if col != target_column and col not in suspect_columns:
                     suspect_columns.append(col)
 
@@ -152,7 +158,7 @@ def deep_checks_node(state: GraphState) -> GraphState:
 
     return {
         "deep_check_results": results,
-        "findings": findings,
+        "findings": [_finding_to_dict(f) for f in findings],
     }
 
 
@@ -165,15 +171,25 @@ _TRUSTED_SEVERITY_ORDER = [
 ]
 
 
-def _highest_severity(findings: list[Finding]) -> Severity:
-    """Return the highest severity among findings (INFO when empty)."""
+def _highest_severity(findings: list[dict]) -> Severity:
+    """Return the highest severity among findings (INFO when empty).
+
+    ``findings`` is a list of plain dicts (serialized Finding objects).
+    """
     if not findings:
         return Severity.INFO
-    return max(findings, key=lambda f: _TRUSTED_SEVERITY_ORDER.index(f.severity)).severity
+    best = max(
+        findings,
+        key=lambda f: _TRUSTED_SEVERITY_ORDER.index(Severity(f["severity"])),
+    )
+    return Severity(best["severity"])
 
 
-def _run_all_checks_deterministically(state: GraphState) -> list[Finding]:
-    """Fallback: run every check without the LLM (used if the agent fails)."""
+def _run_all_checks_deterministically(state: GraphState) -> list[dict]:
+    """Fallback: run every check without the LLM (used if the agent fails).
+
+    Returns findings as plain dicts for checkpointer serialization.
+    """
     csv_path = state.get("csv_path")
     target_column = state.get("target_column")
     if not csv_path:
@@ -187,7 +203,7 @@ def _run_all_checks_deterministically(state: GraphState) -> list[Finding]:
     findings += id_like_check(csv_path, target_column=target_column)
     if target_column:
         findings += leakage_check(csv_path, target_column=target_column)
-    return findings
+    return [_finding_to_dict(f) for f in findings]
 
 
 def make_agent_checks_node(llm: Any) -> Callable[[GraphState], GraphState]:
@@ -206,20 +222,23 @@ def make_agent_checks_node(llm: Any) -> Callable[[GraphState], GraphState]:
                 profile=profile,
                 llm=llm,
             )
+            findings = [_finding_to_dict(f) for f in findings]
         except Exception as exc:  # noqa: BLE001 — LLM may be unreachable
             # Fall back to deterministic checks so the audit still completes.
             findings = _run_all_checks_deterministically(state)
             findings.append(
-                Finding(
-                    check_name="agent",
-                    severity=Severity.INFO,
-                    evidence=(
-                        "LLM agent unavailable "
-                        f"({type(exc).__name__}: {exc}); ran deterministic checks."
-                    ),
-                    affected_columns=[],
-                    suggested_fix="Check the LLM settings in .env and that Ollama is running.",
-                    confidence=1.0,
+                _finding_to_dict(
+                    Finding(
+                        check_name="agent",
+                        severity=Severity.INFO,
+                        evidence=(
+                            "LLM agent unavailable "
+                            f"({type(exc).__name__}: {exc}); ran deterministic checks."
+                        ),
+                        affected_columns=[],
+                        suggested_fix="Check the LLM settings in .env and that Ollama is running.",
+                        confidence=1.0,
+                    )
                 )
             )
 
@@ -257,7 +276,7 @@ def make_synthesize_findings_node(llm: Any) -> Callable[[GraphState], GraphState
         payload = json.dumps(
             {
                 "profile": profile,
-                "findings": [f.model_dump(mode="json") for f in findings],
+                "findings": findings,
             },
             default=str,
         )
@@ -406,7 +425,9 @@ def report_node(state: GraphState) -> GraphState:
     profile = state.get("profile")
     dataset_id = state.get("dataset_id", "unknown")
     error = state.get("error")
-    findings = state.get("findings") or []
+    findings_raw = state.get("findings") or []
+    # Reconstitute Finding objects from dicts for the AuditReport.
+    findings = [Finding.model_validate(f) for f in findings_raw]
     deep_check_results = state.get("deep_check_results") or []
     summary = state.get("summary")
 

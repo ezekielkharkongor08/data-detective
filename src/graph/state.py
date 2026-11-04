@@ -7,13 +7,15 @@ Tools load the CSV from disk when needed.
 from operator import add
 from typing import Annotated, Optional, TypedDict
 
-from src.schemas.finding import Finding
-
 
 class GraphState(TypedDict, total=False):
     """State carried through the audit graph.
 
     All fields are optional so a node can return only the fields it updates.
+
+    ``findings`` is stored as a list of plain dicts (via ``Finding.model_dump``)
+    so the LangGraph checkpointer can serialize them to JSON without needing a
+    custom serializer for Pydantic models.
     """
 
     dataset_id: str
@@ -23,7 +25,7 @@ class GraphState(TypedDict, total=False):
 
     # Merged findings from all parallel checks. ``operator.add`` is the
     # reducer: LangGraph concatenates lists returned by parallel branches.
-    findings: Annotated[list[Finding], add]
+    findings: Annotated[list[dict], add]
 
     # Set by the router when a finding suggests potential leakage.
     leakage_suspected: Optional[bool]

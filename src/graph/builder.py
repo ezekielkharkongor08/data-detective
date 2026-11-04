@@ -43,7 +43,7 @@ CHECKS: list[tuple[str, object]] = [
 ]
 
 
-def build_graph():
+def build_graph(checkpointer=None):
     """Build and compile the M2/M3 audit graph.
 
     Flow:
@@ -55,6 +55,11 @@ def build_graph():
     A conditional edge after load_csv skips the checks entirely if an error
     was set (e.g., missing CSV file). A conditional edge after the router
     runs deep leakage checks only when a finding suggests potential leakage.
+
+    Args:
+        checkpointer: Optional LangGraph checkpointer (e.g. PostgresSaver).
+            When provided, graph state is persisted to PostgreSQL after each
+            node, enabling resume/replay by thread_id.
     """
     builder = StateGraph(GraphState)
 
@@ -109,10 +114,10 @@ def build_graph():
     builder.add_edge("deep_checks", "report")
     builder.add_edge("report", END)
 
-    return builder.compile()
+    return builder.compile(checkpointer=checkpointer)
 
 
-def build_agent_graph(llm=None):
+def build_agent_graph(llm=None, checkpointer=None):
     """Build and compile the M4 LLM-driven audit graph.
 
     Flow:
@@ -121,6 +126,12 @@ def build_agent_graph(llm=None):
 
     A conditional edge after load_csv skips straight to the report if the
     input file is missing.
+
+    Args:
+        llm: Optional LLM instance. Defaults to the cached Ollama model.
+        checkpointer: Optional LangGraph checkpointer (e.g. PostgresSaver).
+            When provided, graph state is persisted to PostgreSQL after each
+            node, enabling resume/replay by thread_id.
     """
     if llm is None:
         llm = get_cached_llm()
@@ -150,7 +161,7 @@ def build_agent_graph(llm=None):
     builder.add_edge("synthesize", "report")
     builder.add_edge("report", END)
 
-    return builder.compile()
+    return builder.compile(checkpointer=checkpointer)
 
 
 __all__ = ["build_graph", "build_agent_graph", "CHECKS"]
