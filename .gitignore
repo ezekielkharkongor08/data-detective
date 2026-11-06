@@ -11,5 +11,3 @@ myenv
 
 # Secrets / local config (never commit .env)
 .env
-
-tests/

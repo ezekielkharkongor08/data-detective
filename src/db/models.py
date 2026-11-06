@@ -49,7 +49,7 @@ class AuditRun(Base):
     dataset_id: Mapped[str | None] = mapped_column(ForeignKey("datasets.id"), nullable=True)
     csv_path: Mapped[str] = mapped_column(String, nullable=False)
     target_column: Mapped[str | None] = mapped_column(String, nullable=True)
-    status: Mapped[str] = mapped_column(String, default="running")  # running | completed | failed | interrupted
+    status: Mapped[str] = mapped_column(String, default="running")  # running | completed | failed
     overall_severity: Mapped[str | None] = mapped_column(String, nullable=True)
     findings_count: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
@@ -71,7 +71,6 @@ class Finding(Base):
     severity: Mapped[str] = mapped_column(String, nullable=False)
     evidence: Mapped[str] = mapped_column(Text, nullable=False)
     affected_columns: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
-    suggested_fix: Mapped[str | None] = mapped_column(Text, nullable=True)
     confidence: Mapped[float] = mapped_column(Integer, nullable=False, default=100)  # stored as 0-100 int
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
 

@@ -1,7 +1,7 @@
 """Graph builder for M2/M3.
 
-Wires: load_csv -> profile -> [5 checks in parallel] -> merge_findings ->
-router -> [deep_checks?] -> report.
+Wires: load_csv -> profile -> [all registered parallel checks] ->
+merge_findings -> router -> [deep_checks?] -> report.
 
 Uses static fan-out (normal edges) and joins via add_edge([...], ...).
 No Send is used.
@@ -15,31 +15,20 @@ from src.graph.nodes import (
     load_csv_node,
     make_agent_checks_node,
     make_check_node,
-    make_synthesize_findings_node,
     merge_findings_node,
     profile_node,
     report_node,
     router_node,
 )
+from src.graph.synthesis import make_synthesize_findings_node
 from src.graph.state import GraphState
-from src.tools.checks import (
-    bias_check,
-    duplicates_check,
-    id_like_check,
-    imbalance_check,
-    missing_check,
-    schema_check,
-)
+from src.tools.checks import get_check, get_checks
 
-# Registry of all M2 parallel checks. The builder loops over this to add
-# nodes and edges. Each entry: (check_name, check_function)
+# Registry of all parallel checks, generated from the check registry. The
+# builder loops over this to add nodes and edges. Each entry:
+# (check_name, check_function)
 CHECKS: list[tuple[str, object]] = [
-    ("bias", bias_check),
-    ("duplicates", duplicates_check),
-    ("missing_values", missing_check),
-    ("schema", schema_check),
-    ("class_imbalance", imbalance_check),
-    ("id_like", id_like_check),
+    (spec.name, spec.run) for spec in get_checks(parallel=True)
 ]
 
 
@@ -47,9 +36,9 @@ def build_graph(checkpointer=None):
     """Build and compile the M2/M3 audit graph.
 
     Flow:
-        load_csv -> profile -> [check1..check5] -> merge_findings -> router
+        load_csv -> profile -> [check1..checkN] -> merge_findings -> router
                                                               -> deep_checks (if leakage suspected)
-                                                              -> report (otherwise)
+                                                              -> report
         deep_checks -> report -> END
 
     A conditional edge after load_csv skips the checks entirely if an error
@@ -71,11 +60,13 @@ def build_graph(checkpointer=None):
     builder.add_node("deep_checks", deep_checks_node)
     builder.add_node("report", report_node)
 
-    # Dynamically add a wrapped node for each check in the registry
+    # Dynamically add a wrapped node for each check in the registry. The
+    # function comes from CHECKS so patching it in tests still works; the
+    # registry supplies required inputs, params, and target-type gating.
     check_node_names: list[str] = []
     for name, fn in CHECKS:
         node_name = f"check_{name}"
-        builder.add_node(node_name, make_check_node(fn))
+        builder.add_node(node_name, make_check_node(get_check(name), run_fn=fn))
         check_node_names.append(node_name)
 
     # Entry point
@@ -91,7 +82,7 @@ def build_graph(checkpointer=None):
         },
     )
 
-    # Fan-out: profile -> each check (5 normal edges)
+    # Fan-out: profile -> each parallel check (normal edges)
     for node_name in check_node_names:
         builder.add_edge("profile", node_name)
 

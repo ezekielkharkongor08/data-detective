@@ -24,13 +24,20 @@ class SynthesisResult(BaseModel):
     summary: str = Field(
         ...,
         description=(
-            "The FULL detailed overview, at least 150 words, as 3-5 short "
-            "paragraphs or bullet lists. Never return only a heading or a title. "
-            "Cover: (1) what the dataset appears to be and its shape "
-            "(rows/columns); (2) what the column groups contain, using their "
-            "real names; (3) every problem found, why it matters, and which "
-            "columns it hits; (4) concrete next steps. Only describe what the "
-            "profile and findings actually show."
+            "The complete summary text using EXACTLY this structure with all-caps "
+            "section headers:\n\n"
+            "OVERVIEW:\n"
+            "<3-4 sentences describing the dataset shape (rows/columns), what the "
+            "data appears to be about using real column names, and its overall health.\n\n"
+            "KEY ISSUES & NEXT STEPS:\n"
+            "- [SEVERITY] <Merged problem description with key numbers and column names>. "
+            "Next step: <Your own dynamic, specific advice based on those exact columns and numbers.>\n"
+            "<Additional bullets as needed, most severe first. Strictly merge ALL findings "
+            "of the same check type into ONE bullet.>\n\n"
+            "Cover: (1) what the dataset is and its shape; (2) every problem found, why it "
+            "matters, and which columns it hits; (3) concrete, dynamic next steps. Only "
+            "describe what the profile and findings actually show. Never return only a "
+            "heading or a title."
         ),
     )
 

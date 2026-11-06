@@ -1,8 +1,8 @@
 """Class imbalance check.
 
 Thresholds:
-  - Minority class share < 10%                         -> HIGH
-  - Minority class share < 30%                         -> MEDIUM
+  - Minority class share < imbalance.high_threshold  -> HIGH
+  - Minority class share < imbalance.medium_threshold -> MEDIUM
 
 Requires ``target_column`` to be set in state. Returns an empty list when
 the target is balanced or when no target column is configured.
@@ -14,29 +14,25 @@ from typing import Optional
 
 import pandas as pd
 
+from src.check_config import check_config
 from src.schemas.finding import Finding, Severity
+from src.tools.checks.registry import register_check
 
 
+@register_check(
+    name="class_imbalance",
+    required=("csv_path", "target_column"),
+    severity_key="class_imbalance",
+    description="Check the class balance of a classification target column.",
+    target_hint=True,
+    tool_name="run_imbalance_check",
+)
 def imbalance_check(
-    csv_path: str, target_column: Optional[str] = None
+    df: pd.DataFrame, target_column: Optional[str] = None
 ) -> list[Finding]:
     """Detect a skewed target class distribution."""
     if not target_column:
         return []
-
-    try:
-        df = pd.read_csv(csv_path)
-    except Exception as exc:
-        return [
-            Finding(
-                check_name="class_imbalance",
-                severity=Severity.HIGH,
-                evidence=f"Failed to read CSV: {exc}",
-                affected_columns=[],
-                suggested_fix="Verify the file path and format.",
-                confidence=1.0,
-            )
-        ]
 
     if target_column not in df.columns:
         return [
@@ -47,9 +43,6 @@ def imbalance_check(
                     f"Target column '{target_column}' not found in CSV."
                 ),
                 affected_columns=[],
-                suggested_fix=(
-                    "Provide the correct target column name."
-                ),
                 confidence=1.0,
             )
         ]
@@ -61,9 +54,9 @@ def imbalance_check(
     value_counts = target.value_counts(normalize=True)
     minority_share = float(value_counts.min())
 
-    if minority_share < 0.10:
+    if minority_share < check_config.imbalance.high_threshold:
         severity = Severity.HIGH
-    elif minority_share < 0.30:
+    elif minority_share < check_config.imbalance.medium_threshold:
         severity = Severity.MEDIUM
     else:
         return []
@@ -77,10 +70,6 @@ def imbalance_check(
                 f"is {round(minority_share * 100, 2)}% of rows."
             ),
             affected_columns=[target_column],
-            suggested_fix=(
-                "Consider class weights, resampling, or stratified "
-                "sampling during training."
-            ),
             confidence=1.0,
         )
     ]

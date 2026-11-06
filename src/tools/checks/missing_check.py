@@ -2,8 +2,8 @@
 
 Thresholds:
   - Any column has > 0% missing                        -> LOW
-  - Any column has > 20% missing                        -> HIGH
-  - Any column has > 50% missing                        -> CRITICAL
+  - Any column has > missing.high_pct  missing         -> HIGH
+  - Any column has > missing.critical_pct missing      -> CRITICAL
 
 Flags common text missing markers.
 
@@ -16,25 +16,22 @@ from typing import Optional
 
 import pandas as pd
 
+from src.check_config import check_config
 from src.schemas.finding import Finding, Severity
+from src.tools.checks.registry import register_check
 from src.tools.missing_markers import count_missing
 
 
-def missing_check(csv_path: str, target_column: Optional[str] = None) -> list[Finding]:
+@register_check(
+    name="missing_values",
+    required=("csv_path",),
+    severity_key="missing_values",
+    description="Check a CSV for missing values (NaN, blanks, and text markers).",
+    always=True,
+    tool_name="run_missing_check",
+)
+def missing_check(df: pd.DataFrame, target_column: Optional[str] = None) -> list[Finding]:
     """Detect missing values."""
-    try:
-        df = pd.read_csv(csv_path)
-    except Exception as exc: 
-        return [
-            Finding(
-                check_name="missing_values",
-                severity=Severity.HIGH,
-                evidence=f"Failed to read CSV: {exc}",
-                affected_columns=[],
-                suggested_fix="Verify the file path and format.",
-                confidence=1.0,
-            )
-        ]
 
     findings: list[Finding] = []
 
@@ -48,9 +45,9 @@ def missing_check(csv_path: str, target_column: Optional[str] = None) -> list[Fi
 
         missing_pct = round(total_missing / len(df) * 100, 2)
 
-        if missing_pct > 50:
+        if missing_pct > check_config.missing.critical_pct:
             severity = Severity.CRITICAL
-        elif missing_pct > 20:
+        elif missing_pct > check_config.missing.high_pct:
             severity = Severity.HIGH
         else:
             severity = Severity.LOW
@@ -69,10 +66,6 @@ def missing_check(csv_path: str, target_column: Optional[str] = None) -> list[Fi
                     f"({missing_pct}% of rows){marker_detail}."
                 ),
                 affected_columns=[col],
-                suggested_fix=(
-                    "Impute missing values, drop affected rows, or investigate "
-                    "the source of the gaps."
-                ),
                 confidence=1.0,
             )
         )

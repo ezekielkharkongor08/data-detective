@@ -23,6 +23,7 @@ from typing_extensions import TypedDict
 
 from src.graph.tools import ALL_TOOLS, _parse
 from src.schemas.finding import Finding
+from src.tools.checks import get_checks
 
 
 class AgentState(TypedDict):
@@ -31,29 +32,51 @@ class AgentState(TypedDict):
     messages: Annotated[list, add_messages]
 
 
-_SYSTEM_PROMPT = """You are Data Detective, a careful data-quality auditor.
+def _build_system_prompt() -> str:
+    """Build the ReAct system prompt from the check registry.
 
-You receive a COMPACT PROFILE of a CSV dataset (columns, dtypes, missing
-counts, sample rows). You never see the full dataset and you do not compute
-statistics yourself.
+    Tool names, descriptions, and the "always / target" guidance all come
+    from check metadata, so adding a check updates the prompt automatically.
+    """
+    specs = get_checks(agent_tool=True)
+    tool_lines = "\n".join(
+        f"- {spec.agent_tool_name}: {spec.description}" for spec in specs
+    )
+    always = [spec.agent_tool_name for spec in specs if spec.always]
+    target_aware = [
+        spec.agent_tool_name for spec in specs if spec.target_hint
+    ]
 
-Your job: choose the right check tools and call them. The ONLY tools are:
-- run_duplicates_check
-- run_missing_check  (finds NaN, blanks, and '?' markers)
-- run_schema_check
-- run_imbalance_check
-- run_id_like_check
-- run_leakage_check
+    rules = [
+        "- Call EVERY relevant check in ONE response, using multiple tool "
+        "calls at once.",
+    ]
+    if always:
+        rules.append(f"- Always call: {', '.join(always)}.")
+    if target_aware:
+        rules.append(
+            "- If a target_column is given, also call: "
+            f"{', '.join(target_aware)} with that target_column."
+        )
+    rules.extend(
+        [
+            "- Pass the csv_path exactly as given.",
+            "- Call each tool at most once.",
+        ]
+    )
 
-Rules:
-- Call EVERY relevant check in ONE response, using multiple tool calls at once.
-- Always call run_duplicates_check, run_missing_check, and run_schema_check.
-  Missing values may be encoded as '?' even when the profile shows 0 NaN.
-- If a target_column is given, call run_imbalance_check, run_id_like_check,
-  and run_leakage_check with that target_column.
-- Pass the csv_path exactly as given.
-- Call each tool at most once.
-"""
+    return (
+        "You are Data Detective, a careful data-quality auditor.\n\n"
+        "You receive a COMPACT PROFILE of a CSV dataset (columns, dtypes, "
+        "missing counts, sample rows). You never see the full dataset and you "
+        "do not compute statistics yourself.\n\n"
+        "Your job: choose the right check tools and call them. The ONLY tools "
+        f"are:\n{tool_lines}\n\n"
+        "Rules:\n" + "\n".join(rules) + "\n"
+    )
+
+
+_SYSTEM_PROMPT = _build_system_prompt()
 
 
 def build_check_agent(

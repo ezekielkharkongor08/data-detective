@@ -2,7 +2,7 @@
 
 Thresholds:
   - Any duplicate rows exist                          -> MEDIUM
-  - More than 10% of rows are duplicates              -> HIGH
+  - More than duplicates.high_pct  % of rows are dup  -> HIGH
 
 Returns an empty list when no duplicates are found.
 """
@@ -13,24 +13,20 @@ from typing import Optional
 
 import pandas as pd
 
+from src.check_config import check_config
 from src.schemas.finding import Finding, Severity
+from src.tools.checks.registry import register_check
 
 
-def duplicates_check(csv_path: str, target_column: Optional[str] = None) -> list[Finding]:
+@register_check(
+    name="duplicates",
+    required=("csv_path",),
+    severity_key="duplicates",
+    description="Check a CSV for duplicate rows.",
+    always=True,
+)
+def duplicates_check(df: pd.DataFrame, target_column: Optional[str] = None) -> list[Finding]:
     """Detect repeated rows in a CSV file."""
-    try:
-        df = pd.read_csv(csv_path)
-    except Exception as exc: 
-        return [
-            Finding(
-                check_name="duplicates",
-                severity=Severity.HIGH,
-                evidence=f"Failed to read CSV: {exc}",
-                affected_columns=[],
-                suggested_fix="Verify the file path and format.",
-                confidence=1.0,
-            )
-        ]
 
     n_rows = len(df)
     if n_rows == 0:
@@ -41,7 +37,7 @@ def duplicates_check(csv_path: str, target_column: Optional[str] = None) -> list
         return []
 
     dupe_pct = round(n_dupes / n_rows * 100, 2)
-    severity = Severity.HIGH if dupe_pct > 10 else Severity.MEDIUM
+    severity = Severity.HIGH if dupe_pct > check_config.duplicates.high_pct else Severity.MEDIUM
 
     return [
         Finding(
@@ -52,10 +48,6 @@ def duplicates_check(csv_path: str, target_column: Optional[str] = None) -> list
                 f"({dupe_pct}% of rows)."
             ),
             affected_columns=[],
-            suggested_fix=(
-                "Remove exact duplicate rows or investigate why they were "
-                "recorded multiple times."
-            ),
             confidence=1.0,
         )
     ]

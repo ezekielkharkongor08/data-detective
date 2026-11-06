@@ -5,19 +5,20 @@ Run a pipeline audit or the LLM agent audit.
 Examples:
     python main.py data/raw/adult.csv --target income
     python main.py data/raw/adult.csv --target income --agent
-    python main.py data/raw/adult.csv --target income --format json
-    python main.py data/raw/adult.csv --target income --format both
     python main.py --list
-    python main.py data/raw/adult.csv --target income --resume <run_id>
+    python main.py data/raw/adult.csv --target income --thread-id run-001
+    python main.py data/raw/adult.csv --target income --sensitive <column_name> --favorable <val>  # Runs fairness and bias checks for specific groups
 
 The agent mode reads LLM settings from `.env`.
-The canonical output is JSON (state["report"]); plain text is rendered from
-the same object (state["report_text"]).
+Plain-text output is printed to stdout; the full JSON report is persisted to
+PostgreSQL.
 
-M5 persistence:
-    --list          List past audit runs from PostgreSQL and exit.
-    --resume ID     Resume a saved audit run by run_id (== LangGraph thread_id).
-    --thread-id ID  Use this thread_id for the run (auto-generated if omitted).
+Persistence:
+    --list            List past audit runs from PostgreSQL and exit.
+    --thread-id ID    Use this thread_id for the run (auto-generated if omitted).
+
+The graph runs to completion in a single invoke; there is no human-in-the-loop
+pause. PostgresSaver silently saves run history to the database.
 """
 
 from __future__ import annotations
@@ -44,25 +45,30 @@ def _parse_args() -> argparse.Namespace:
         help="Optional target column (needed for imbalance/leakage checks).",
     )
     parser.add_argument(
+        "--sensitive",
+        action="append",
+        default=[],
+        metavar="COLUMN",
+        help=(
+            "Sensitive column for the fairness check. Repeat the flag or use "
+            "a comma-separated list."
+        ),
+    )
+    parser.add_argument(
+        "--favorable",
+        default=None,
+        metavar="VALUE",
+        help="Favorable outcome value for the fairness check (for example '>50K').",
+    )
+    parser.add_argument(
         "--agent",
         action="store_true",
         help="Use the M4 LLM agent graph (requires the model in .env).",
     )
     parser.add_argument(
-        "--format",
-        choices=["text", "json", "both"],
-        default="text",
-        help="Output format: text (default), json, or both.",
-    )
-    parser.add_argument(
         "--list",
         action="store_true",
         help="List past audit runs from PostgreSQL and exit.",
-    )
-    parser.add_argument(
-        "--resume",
-        default=None,
-        help="Resume a saved audit run by run_id (== LangGraph thread_id).",
     )
     parser.add_argument(
         "--thread-id",
@@ -72,16 +78,31 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _print_report(report: str | None, report_text: str | None, fmt: str) -> None:
-    if fmt == "json":
-        print(report if report is not None else "")
-    elif fmt == "both":
-        if report_text:
-            print(report_text)
-            print()
-        print(report if report is not None else "")
-    else:
-        print(report_text if report_text is not None else report or "(no report produced)")
+def _parse_columns(values: list[str]) -> list[str]:
+    """Flatten repeatable/comma-separated CLI values into unique names."""
+    columns: list[str] = []
+    for value in values:
+        for part in value.split(","):
+            name = part.strip()
+            if name and name not in columns:
+                columns.append(name)
+    return columns
+
+
+def _build_check_params(args: argparse.Namespace) -> dict[str, dict]:
+    """Translate friendly CLI flags into the generic ``check_params`` dict."""
+    check_params: dict[str, dict] = {}
+
+    sensitive = _parse_columns(args.sensitive)
+    bias_params: dict[str, object] = {}
+    if sensitive:
+        bias_params["sensitive_columns"] = sensitive
+    if args.favorable:
+        bias_params["favorable_value"] = args.favorable
+    if bias_params:
+        check_params["bias"] = bias_params
+
+    return check_params
 
 
 @contextmanager
@@ -117,11 +138,13 @@ def main() -> None:
         if not runs:
             print("(no audit runs found)")
             return
-        print(f"{'Run ID':<38s} | {'Status':<12s} | {'Severity':<10s} | {'Findings':<9s} | CSV")
-        print("-" * 100)
+        print(
+            f"{'Run ID':<38s} | {'Status':<12s} | {'Approval':<11s} | {'Severity':<10s} | {'Findings':<9s} | CSV"
+        )
+        print("-" * 120)
         for r in runs:
             print(
-                f"{r['run_id']:<38s} | {r['status']:<12s} | {r['overall_severity'] or '-':<10s} | {r['findings_count']:<9d} | {r['csv_path']}"
+                f"{r['run_id']:<38s} | {r['status']:<12s} | {r['approval_status']:<11s} | {r['overall_severity'] or '-':<10s} | {r['findings_count']:<9d} | {r['csv_path']}"
             )
         return
 
@@ -132,18 +155,19 @@ def main() -> None:
     # run_id is the LangGraph thread_id for this audit run.
     run_id = args.thread_id or str(uuid.uuid4())
 
-    # Build the graph with the PostgresSaver checkpointer.
+    # Build the graph with the PostgresSaver checkpointer. The graph runs to
+    # completion in a single invoke() — there is no human-in-the-loop pause.
     with _persisted_graph(args.agent) as graph:
         config = {"configurable": {"thread_id": run_id}}
 
-        # Resume: LangGraph loads the last checkpoint for this thread_id
-        # automatically when the same thread_id is reused. Pass minimal input.
-        initial_state: dict = {}
-        if not args.resume:
-            # Fresh run: provide csv_path and target_column as initial input.
-            initial_state = {"csv_path": args.csv_path, "target_column": args.target}
-
-        state = graph.invoke(initial_state, config=config)
+        state = graph.invoke(
+            {
+                "csv_path": args.csv_path,
+                "target_column": args.target,
+                "check_params": _build_check_params(args),
+            },
+            config=config,
+        )
 
         if state.get("error"):
             print(f"Error: {state['error']}")
@@ -161,7 +185,7 @@ def main() -> None:
                 "severity": f["severity"],
                 "evidence": f["evidence"],
                 "affected_columns": f["affected_columns"],
-                "suggested_fix": f.get("suggested_fix"),
+
                 "confidence": f["confidence"],
             }
             for f in findings_raw
@@ -178,7 +202,10 @@ def main() -> None:
             report_text=report_text,
         )
 
-        _print_report(report, report_text, args.format)
+        if report_text:
+            print(report_text)
+        else:
+            print("(no report produced)")
 
 
 if __name__ == "__main__":

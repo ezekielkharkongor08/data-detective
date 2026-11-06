@@ -4,6 +4,9 @@ router -> [deep_checks?] -> report.
 Each node takes the current GraphState and returns a dict of field updates
 to merge into the state. Calculation logic is kept in pure helper functions
 so it can be tested without LangGraph.
+
+LLM synthesis logic (prompts, payload builders, fallback summary) lives in
+:mod:`src.graph.synthesis`.
 """
 
 import json
@@ -12,18 +15,18 @@ from typing import Any, Callable
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from src.graph.agent import run_checks_with_agent
+from src.graph.synthesis import make_synthesize_findings_node
 from src.graph.state import GraphState
 from src.schemas.finding import Finding, Severity
-from src.schemas.report import AuditReport, SynthesisResult
+from src.schemas.report import AuditReport
 from src.tools.checks import (
-    duplicates_check,
-    id_like_check,
-    imbalance_check,
-    missing_check,
-    schema_check,
+    CheckSpec,
+    error_finding,
+    get_check,
+    get_checks,
+    run_check,
 )
-from src.tools.checks.leakage_check import leakage_check
+from src.tools.csv_reader import read_csv_robust
 from src.tools.profiling import profile_dataset
 
 
@@ -50,44 +53,80 @@ def _finding_to_dict(f: Finding) -> dict:
 
 
 def _wrap_check(check_fn: Callable[..., list[Finding]], state: GraphState) -> dict:
-    """Run a check function safely so one failure can't crash the parallel step.
+    """Run a raw check function safely so one failure can't crash a step.
 
-    Returns a dict with a ``findings`` key containing the check's findings as
-    plain dicts (serializable by the LangGraph checkpointer) or a single error
-    finding if the check raised.
+    Loads the CSV once and passes the pre-loaded DataFrame to the check,
+    matching the new check signature ``(df, target_column=None, ...)``.
+    Kept for direct callers and tests. Registry-driven nodes use
+    :func:`make_check_node`, which also applies the registry contract.
     """
     csv_path = state.get("csv_path")
+    if not csv_path or (isinstance(csv_path, str) and not csv_path.strip()):
+        name = getattr(check_fn, "__name__", "unknown")
+        return {
+            "findings": [
+                _finding_to_dict(error_finding(name, ValueError("No csv_path provided.")))
+            ]
+        }
+
+    # Load the CSV once, centrally.
+    try:
+        df = read_csv_robust(csv_path)
+    except Exception as exc:
+        name = getattr(check_fn, "__name__", "unknown")
+        return {"findings": [_finding_to_dict(error_finding(name, exc))]}
+
     target_column = state.get("target_column")
     try:
-        findings = check_fn(csv_path=csv_path, target_column=target_column)
+        findings = check_fn(df=df, target_column=target_column)
     except Exception as exc:  # noqa: BLE001 — wrapper safety
-        findings = [
-            Finding(
-                check_name=getattr(check_fn, "__name__", "unknown"),
-                severity=Severity.HIGH,
-                evidence=f"Check failed with error: {exc}",
-                affected_columns=[],
-                suggested_fix="Investigate the check implementation.",
-                confidence=0.0,
-            )
-        ]
+        name = getattr(check_fn, "__name__", "unknown")
+        findings = [error_finding(name, exc)]
     return {"findings": [_finding_to_dict(f) for f in findings]}
 
 
-def make_check_node(check_fn: Callable[..., list[Finding]]) -> Callable[[GraphState], dict]:
-    """Factory that wraps a check function into a LangGraph node."""
+def _run_registered_check(
+    spec: CheckSpec,
+    state: GraphState,
+    run_fn: Callable[..., list[Finding]] | None = None,
+) -> dict:
+    """Run one registered check through the registry contract.
+
+    Missing inputs and unsupported target types become one informational
+    note; unexpected exceptions become one HIGH error finding. Either way the
+    rest of the audit continues.
+    """
+    try:
+        findings = run_check(spec, state, run_fn=run_fn)
+    except Exception as exc:  # noqa: BLE001 — one check must not crash the run
+        findings = [error_finding(spec.name, exc)]
+    return {"findings": [_finding_to_dict(f) for f in findings]}
+
+
+def make_check_node(
+    spec: CheckSpec,
+    run_fn: Callable[..., list[Finding]] | None = None,
+) -> Callable[[GraphState], dict]:
+    """Factory that wraps a registered check into a LangGraph node.
+
+    Args:
+        spec: Registry metadata for the check.
+        run_fn: Optional override for the function to call. The builder uses
+            this so tests can patch ``builder.CHECKS`` without losing the
+            registry metadata (required inputs, params, target gating).
+    """
     def _node(state: GraphState) -> dict:
-        return _wrap_check(check_fn, state)
-    _node.__name__ = f"check_{getattr(check_fn, '__name__', 'unknown')}"
+        return _run_registered_check(spec, state, run_fn=run_fn)
+    _node.__name__ = f"check_{spec.name}"
     return _node
 
 
 def merge_findings_node(state: GraphState) -> GraphState:
     """Merge findings from all parallel check branches.
 
-    Relies on the ``Annotated[list[Finding], operator.add]`` reducer in
-    GraphState: LangGraph already concatenates the lists. This node is a
-    no-op passthrough that ensures the merge step exists in the graph.
+    The actual merging is done by the ``merge_findings`` reducer in
+    GraphState: LangGraph concatenates the lists and drops duplicates. This
+    node is a no-op passthrough that gives the join an explicit step.
     """
     return {}
 
@@ -125,27 +164,36 @@ def router_node(state: GraphState) -> GraphState:
 
 
 def deep_checks_node(state: GraphState) -> GraphState:
-    """Run deep leakage check on all columns.
+    """Run the deep leakage check on the router-flagged suspect columns.
 
-    When the router suspects leakage, runs leakage_check across all
-    non-target columns to find the actual leaking column(s). Results are
-    stored in ``deep_check_results`` and any leakage findings are returned
-    to be merged into the findings list via the operator.add reducer.
+    When the router suspects leakage, the registry's ``target_leakage`` check
+    runs only on the ``suspect_columns`` stored in state (ID-like or
+    schema-flagged columns) instead of every non-target column. This avoids
+    running an expensive Cross-Validation loop on columns that have no
+    leakage signal.
+
+    Results are stored in ``deep_check_results`` and any leakage findings are
+    returned to be merged into the findings list via the ``merge_findings``
+    reducer.
     """
     csv_path = state.get("csv_path")
     target_column = state.get("target_column")
+    suspect_columns = state.get("suspect_columns") or []
 
     if not csv_path or not target_column:
         return {"deep_check_results": []}
 
-    # Test all columns for leakage, not just the ones the router flagged.
-    # The router's job is to decide *whether* to run deep checks; the
-    # deep check itself examines every column.
-    findings = leakage_check(
-        csv_path=csv_path,
-        target_column=target_column,
-        suspicious_columns=None,
-    )
+    # No suspect columns means there is nothing expensive to check.
+    if not suspect_columns:
+        return {"deep_check_results": []}
+
+    spec = get_check("target_leakage")
+    deep_state = dict(state)
+    deep_state["check_params"] = {
+        **(state.get("check_params") or {}),
+        "target_leakage": {"suspicious_columns": suspect_columns},
+    }
+    findings = run_check(spec, deep_state)
 
     results = [
         {
@@ -162,47 +210,37 @@ def deep_checks_node(state: GraphState) -> GraphState:
     }
 
 
-_TRUSTED_SEVERITY_ORDER = [
-    Severity.INFO,
-    Severity.LOW,
-    Severity.MEDIUM,
-    Severity.HIGH,
-    Severity.CRITICAL,
-]
-
-
 def _highest_severity(findings: list[dict]) -> Severity:
     """Return the highest severity among findings (INFO when empty).
 
-    ``findings`` is a list of plain dicts (serialized Finding objects).
+    Uses :class:`Finding.__lt__`, which ranks severity by the
+    :class:`Severity` enum declaration order (CRITICAL > HIGH > MEDIUM >
+    LOW > INFO).
     """
     if not findings:
         return Severity.INFO
-    best = max(
-        findings,
-        key=lambda f: _TRUSTED_SEVERITY_ORDER.index(Severity(f["severity"])),
-    )
-    return Severity(best["severity"])
+    finding_objs = [Finding.model_validate(f) for f in findings]
+    return min(finding_objs).severity
 
 
 def _run_all_checks_deterministically(state: GraphState) -> list[dict]:
     """Fallback: run every check without the LLM (used if the agent fails).
 
+    Checks come from the registry's ``fallback`` group, so a new check joins
+    the fallback automatically unless it opts out (for example, fairness,
+    which must only run with user-specified sensitive columns).
+
     Returns findings as plain dicts for checkpointer serialization.
     """
-    csv_path = state.get("csv_path")
-    target_column = state.get("target_column")
-    if not csv_path:
+    if not state.get("csv_path"):
         return []
 
     findings: list[Finding] = []
-    findings += duplicates_check(csv_path)
-    findings += missing_check(csv_path)
-    findings += schema_check(csv_path)
-    findings += imbalance_check(csv_path, target_column=target_column)
-    findings += id_like_check(csv_path, target_column=target_column)
-    if target_column:
-        findings += leakage_check(csv_path, target_column=target_column)
+    for spec in get_checks(fallback=True):
+        try:
+            findings += run_check(spec, state)
+        except Exception as exc:  # noqa: BLE001 — one check must not stop the rest
+            findings.append(error_finding(spec.name, exc))
     return [_finding_to_dict(f) for f in findings]
 
 
@@ -216,6 +254,7 @@ def make_agent_checks_node(llm: Any) -> Callable[[GraphState], GraphState]:
 
         profile = state.get("profile") or {}
         try:
+            from src.graph.agent import run_checks_with_agent
             findings, _messages = run_checks_with_agent(
                 csv_path=csv_path,
                 target_column=state.get("target_column"),
@@ -236,7 +275,6 @@ def make_agent_checks_node(llm: Any) -> Callable[[GraphState], GraphState]:
                             f"({type(exc).__name__}: {exc}); ran deterministic checks."
                         ),
                         affected_columns=[],
-                        suggested_fix="Check the LLM settings in .env and that Ollama is running.",
                         confidence=1.0,
                     )
                 )
@@ -250,66 +288,6 @@ def make_agent_checks_node(llm: Any) -> Callable[[GraphState], GraphState]:
         return {"findings": findings, "error": None}
 
     return agent_checks_node
-
-
-def make_synthesize_findings_node(llm: Any) -> Callable[[GraphState], GraphState]:
-    """Factory for the node that asks the LLM for a structured summary."""
-
-    def synthesize_findings_node(state: GraphState) -> GraphState:
-        findings = state.get("findings") or []
-        profile = state.get("profile") or {}
-
-        system = SystemMessage(
-            content=(
-                "You are Data Detective. Given a dataset profile and a list "
-                "of findings, write a DETAILED plain-English overview. "
-                "Put the whole text in the `summary` field: at least 150 words, "
-                "3-5 short paragraphs or bullet lists. Never return only a heading. "
-                "Cover: (1) what the dataset appears to be and its shape (rows/columns); "
-                "(2) what the column groups contain, using their real names; "
-                "(3) every problem found, why it matters, and which columns it hits; "
-                "(4) concrete next steps. "
-                "Only describe what the profile and findings actually show."
-            )
-        )
-
-        payload = json.dumps(
-            {
-                "profile": profile,
-                "findings": findings,
-            },
-            default=str,
-        )
-
-        try:
-            structured = llm.with_structured_output(SynthesisResult)
-            result = structured.invoke([system, HumanMessage(content=payload)])
-        except Exception as exc:  # noqa: BLE001 — structured output may fail
-            return {
-                "summary": f"(LLM summary unavailable: {type(exc).__name__}: {exc})",
-                "overall_severity": _highest_severity(findings).value,
-            }
-
-        summary = result.summary
-
-        # JSON mode on small local models sometimes returns only a heading.
-        # Ask again in plain text so the user still gets a real summary.
-        if len(summary.strip()) < 80:
-            try:
-                raw = llm.invoke([system, HumanMessage(content=payload)])
-                text = raw.content if isinstance(raw.content, str) else str(raw.content)
-                if len(text.strip()) > len(summary.strip()):
-                    summary = text
-            except Exception:  # noqa: BLE001 - keep the short summary instead
-                pass
-
-        # Severity is computed from the findings, not trusted to the LLM.
-        return {
-            "summary": summary,
-            "overall_severity": _highest_severity(findings).value,
-        }
-
-    return synthesize_findings_node
 
 
 def render_text_report(report: AuditReport) -> str:
@@ -352,8 +330,6 @@ def render_text_report(report: AuditReport) -> str:
                 f"  [{f.severity.value.upper()}] {f.check_name}: {f.evidence} "
                 f"(columns: {cols}, confidence: {f.confidence})"
             )
-            if f.suggested_fix:
-                lines.append(f"    -> {f.suggested_fix}")
         lines.append("")
 
     # Deep check results section (M3 addition)
@@ -405,7 +381,7 @@ def profile_node(state: GraphState) -> GraphState:
         return {"error": "No csv_path in state; cannot profile."}
 
     try:
-        profile = profile_dataset(csv_path)
+        profile = profile_dataset(csv_path, target_column=state.get("target_column"))
     except Exception as exc:  # noqa: BLE001 — surface any load error in state
         return {"error": f"Failed to profile {csv_path}: {exc}"}
 
@@ -449,3 +425,17 @@ def report_node(state: GraphState) -> GraphState:
         "report": report_obj.to_json(),
         "report_text": render_text_report(report_obj),
     }
+
+
+__all__ = [
+    "load_csv_node",
+    "profile_node",
+    "merge_findings_node",
+    "router_node",
+    "deep_checks_node",
+    "make_agent_checks_node",
+    "make_check_node",
+    "render_text_report",
+    "report_node",
+    "_highest_severity",
+]

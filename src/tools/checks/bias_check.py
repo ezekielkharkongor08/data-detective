@@ -1,371 +1,471 @@
-"""Bias / fairness detection check.
+"""Fairness check: compare favorable outcome rates across sensitive groups.
 
-Uses cross-validated ROC AUC instead of raw accuracy because accuracy is
-misleading on imbalanced targets: a majority-class-only predictor scores
-~76% on Adult and ~73% on Telco with zero real signal. ROC AUC is invariant
-to class balance.
+Design rules
+------------
+- **User-specified columns only.** The check never picks a sensitive column
+  on its own. A short column-name hint list is used only inside the skip note
+  to suggest candidates; hinted columns are not analysed.
+- **Binary targets only.** Fairness rates need a clear favorable outcome.
+  Multiclass and continuous targets are skipped with one informational note.
+- **No model training.** The check compares observed outcome rates. It does
+  not train a classifier or use cross-validation.
+- **Every skip is explicit.** Missing inputs, ambiguous favorable values,
+  groups below ``check_config.bias.min_group_size``, and non-significant differences all return
+  an informational note instead of silently doing nothing.
 
-A sensitive attribute (e.g. gender, race) that alone can predict the target
-indicates potential bias: the protected column carries signal about the
-outcome, which can lead to unfair model behavior.
+Statistics
+----------
+For each sensitive column, eligible groups (at least ``check_config.bias.min_group_size``
+non-missing rows) are compared:
 
-Supports both classification (ROC AUC) and regression (R^2).
+- **Favorable rate**: share of the group whose target equals the favorable
+  value.
+- **Rate difference**: reference group rate minus the worst-off group rate,
+  in percentage points.
+- **Disparate impact (DI)**: worst-off rate divided by the reference rate.
+  The reference is the group with the highest favorable rate.
+- **Chi-square p-value**: computed with ``scipy.stats.chi2_contingency`` on
+  the group-by-outcome contingency table. A finding needs ``p < check_config.bias.p_value_limit``
+  so a small-sample fluke is not reported as a real disparity.
 
-Returns a list of Finding objects (empty means no bias detected).
+Severity is based on the disparate impact ratio:
+
+- ``DI < 0.4`` -> CRITICAL
+- ``DI < 0.6`` -> HIGH
+- ``DI < 0.8`` -> MEDIUM
+- ``DI >= 0.8`` -> no finding
 """
 
 from __future__ import annotations
 
+import re
 from typing import Optional
 
-import numpy as np
 import pandas as pd
-from sklearn.impute import SimpleImputer
-from sklearn.linear_model import LinearRegression, LogisticRegression
-from sklearn.model_selection import KFold, StratifiedKFold, cross_val_score
-from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import LabelEncoder, OneHotEncoder
+from scipy.stats import chi2_contingency
 
+from src.check_config import check_config
 from src.schemas.finding import Finding, Severity
+from src.tools.checks.registry import info_note, register_check
+from src.tools.target_type import detect_target_type
+
+# Fairness thresholds live in the shared config (check_config.bias).
+# Generic column-name hints. These are *hints only*: the check never selects
+# a sensitive column from this list. It uses the list to suggest columns in
+# the "no sensitive columns specified" note.
+SENSITIVE_NAME_HINTS = (
+    "sex",
+    "gender",
+    "race",
+    "ethnic",
+    "age",
+    "religion",
+    "marital",
+    "disabilit",
+    "orientation",
+    "nationalit",
+    "country",
+    "veteran",
+    "pregnan",
+)
 
 
-# Cross-validation folds
-_CV_FOLDS = 5
-
-# Minimum rows required to run the bias test.
-_MIN_ROWS = 10
-
-# Auto-detection: a column is a candidate sensitive column when it is
-# string/category and its unique-value ratio is at or below this threshold.
-_SENSITIVE_UNIQUE_RATIO = 0.1
-
-# Auto-detection: maximum unique values for a candidate sensitive column.
-_SENSITIVE_MAX_UNIQUE = 10
-
-# ROC AUC thresholds for single-column bias detection (classification).
-# Lower than leakage thresholds because any predictive power from a
-# protected attribute is a fairness concern.
-_CRITICAL_AUC = 0.90
-_HIGH_AUC = 0.80
-_MEDIUM_AUC = 0.70
-
-# Random-guess AUC baseline.
-_RANDOM_AUC = 0.5
-
-# R^2 thresholds for single-column bias detection (regression).
-_CRITICAL_R2 = 0.70
-_HIGH_R2 = 0.50
-_MEDIUM_R2 = 0.30
+def _skip(message: str) -> list[Finding]:
+    """Return a single informational note with the fairness check name."""
+    return [info_note("bias", message)]
 
 
-def _is_continuous_target(y: pd.Series) -> bool:
-    """Decide whether the target column is continuous (regression) or
-    discrete (classification).
+def _hint_candidates(df: pd.DataFrame, target_column: Optional[str]) -> list[str]:
+    """Return column names that *look* sensitive, for the skip note only.
 
-    A target is continuous when it is numeric, has more than 2 unique
-    values, AND many distinct values relative to the number of rows
-    (e.g. salary, price, age). A binary target is always classification.
-    """
-    if not pd.api.types.is_numeric_dtype(y):
-        return False
-    n_rows = len(y)
-    if n_rows == 0:
-        return False
-    nunique = y.nunique(dropna=True)
-    # Binary targets are always classification.
-    if nunique <= 2:
-        return False
-    unique_ratio = nunique / n_rows
-    return unique_ratio > 0.1
-
-
-def _build_column_pipeline(series: pd.Series, regression: bool = False) -> Pipeline:
-    """Build a preprocessing + model pipeline for a single column.
-
-    All preprocessing happens inside the pipeline and is re-fit on each
-    CV training fold, so no information from a validation fold leaks into
-    the training data.
-    """
-    model: object
-    if regression:
-        model = LinearRegression()
-    else:
-        model = LogisticRegression(max_iter=1000)
-
-    if pd.api.types.is_numeric_dtype(series):
-        return Pipeline([
-            ("imputer", SimpleImputer(strategy="median")),
-            ("clf", model),
-        ])
-
-    # Categorical / string column: impute then one-hot encode.
-    return Pipeline([
-        ("imputer", SimpleImputer(strategy="most_frequent")),
-        ("encoder", OneHotEncoder(handle_unknown="ignore", sparse_output=False)),
-        ("clf", model),
-    ])
-
-
-def _majority_baseline_pct(y: pd.Series) -> float:
-    """Return the majority-class share as a percentage (classification only)."""
-    if len(y) == 0:
-        return 0.0
-    counts = y.value_counts(normalize=True)
-    return float(counts.iloc[0] * 100)
-
-
-def _auto_detect_sensitive_columns(
-    df: pd.DataFrame, target_column: Optional[str]
-) -> list[str]:
-    """Auto-detect candidate sensitive columns.
-
-    Returns string/category columns with low cardinality (few unique values
-    relative to row count) that are not the target column. These are typical
-    sensitive attributes such as gender, race, or marital status.
+    Matching is token-based so ``language`` does not match ``age``.
     """
     candidates: list[str] = []
-    n_rows = len(df)
-    if n_rows == 0:
-        return candidates
-
-    for col in df.columns:
-        if col == target_column:
+    for column in df.columns:
+        if column == target_column:
             continue
-        series = df[col]
-        # Only consider string/category columns as potential sensitive attrs.
-        if not (
-            pd.api.types.is_string_dtype(series)
-            or pd.api.types.is_categorical_dtype(series)
+        tokens = [
+            token
+            for token in re.split(r"[^a-z0-9]+", str(column).lower())
+            if token
+        ]
+        if any(
+            token.startswith(hint)
+            for token in tokens
+            for hint in SENSITIVE_NAME_HINTS
         ):
-            continue
-        nunique = series.nunique(dropna=True)
-        if nunique < 2:
-            continue
-        unique_ratio = nunique / n_rows
-        # A column is a candidate sensitive column if it has few unique
-        # values relative to row count, or a small absolute number of
-        # unique values (covers small datasets like unit tests).
-        if (
-            unique_ratio <= _SENSITIVE_UNIQUE_RATIO
-            or nunique <= _SENSITIVE_MAX_UNIQUE
-        ):
-            candidates.append(col)
-
+            candidates.append(str(column))
     return candidates
 
 
+def _favorable_mask(series: pd.Series, favorable_value: object) -> pd.Series:
+    """Return a boolean mask for rows whose target is the favorable outcome."""
+    if pd.api.types.is_bool_dtype(series):
+        if isinstance(favorable_value, str):
+            favorable = favorable_value.strip().lower() in {
+                "true",
+                "1",
+                "yes",
+                "y",
+                "t",
+            }
+        else:
+            favorable = bool(favorable_value)
+        return series.eq(favorable).fillna(False).astype(bool)
+
+    if pd.api.types.is_numeric_dtype(series):
+        try:
+            favorable_number = float(favorable_value)
+            return series.eq(favorable_number).fillna(False).astype(bool)
+        except (TypeError, ValueError):
+            pass
+
+    return (
+        series.astype(str)
+        .str.strip()
+        .eq(str(favorable_value).strip())
+        .fillna(False)
+        .astype(bool)
+    )
+
+
+def _resolve_favorable_value(
+    target: pd.Series,
+    favorable_value: object | None,
+) -> tuple[object | None, bool, str | None]:
+    """Decide which target value counts as the favorable outcome.
+
+    Returns ``(value, inferred, error)``.
+
+    - A user-provided value is validated against the target values.
+    - A boolean target defaults to ``True`` and a 0/1 numeric target to ``1``.
+    - Anything else is ambiguous, so the check skips with a message instead of
+      guessing semantics (for example, whether "Yes" churn is favorable).
+    """
+    if favorable_value is not None and str(favorable_value).strip() != "":
+        mask = _favorable_mask(target.dropna(), favorable_value)
+        if not bool(mask.any()):
+            return (
+                None,
+                False,
+                f"Skipped: favorable_value '{favorable_value}' does not "
+                f"appear in target '{target.name}'.",
+            )
+        return favorable_value, False, None
+
+    if pd.api.types.is_bool_dtype(target):
+        return True, True, None
+
+    if pd.api.types.is_numeric_dtype(target):
+        unique_values = set(target.dropna().unique().tolist())
+        if unique_values == {0, 1}:
+            return 1, True, None
+
+    values = sorted({str(value) for value in target.dropna().unique().tolist()})[:5]
+    return (
+        None,
+        False,
+        "Skipped: no favorable_value was provided and the target values are "
+        f"ambiguous ({', '.join(values)}). Pass favorable_value (for example "
+        "'Yes' or '>50K') so fairness rates have a clear positive outcome.",
+    )
+
+
+def _group_stats(
+    df: pd.DataFrame,
+    sensitive_column: str,
+    target_column: str,
+    favorable_value: object,
+) -> tuple[list[dict], int, int]:
+    """Compute per-group favorable counts and rates.
+
+    Returns ``(eligible_stats, dropped_rows, dropped_small_groups)``.
+    Groups smaller than ``check_config.bias.min_group_size`` are left out.
+    """
+    clean = df[[sensitive_column, target_column]].dropna()
+    dropped_rows = len(df) - len(clean)
+    if clean.empty:
+        return [], dropped_rows, 0
+
+    clean = clean.assign(
+        _favorable=_favorable_mask(clean[target_column], favorable_value)
+    )
+    grouped = clean.groupby(sensitive_column, observed=True)["_favorable"].agg(
+        ["count", "sum"]
+    )
+
+    stats: list[dict] = []
+    for key, row in grouped.iterrows():
+        n_rows = int(row["count"])
+        if n_rows < check_config.bias.min_group_size:
+            continue
+        favorable_count = int(row["sum"])
+        stats.append(
+            {
+                "group": str(key),
+                "n": n_rows,
+                "favorable": favorable_count,
+                "rate": favorable_count / n_rows,
+            }
+        )
+
+    dropped_small_groups = len(grouped) - len(stats)
+    return stats, dropped_rows, dropped_small_groups
+
+
+def _check_one_column(
+    df: pd.DataFrame,
+    sensitive_column: str,
+    target_column: str,
+    favorable_value: object,
+    inferred_favorable: bool,
+) -> list[Finding]:
+    """Run the fairness comparison for one sensitive column."""
+    try:
+        stats, dropped_rows, dropped_small_groups = _group_stats(
+            df, sensitive_column, target_column, favorable_value
+        )
+    except Exception as exc:  # noqa: BLE001 - odd column types must not crash
+        return _skip(
+            f"Skipped '{sensitive_column}': could not group the data "
+            f"({type(exc).__name__}: {exc})."
+        )
+
+    if len(stats) < 2:
+        return _skip(
+            f"Skipped '{sensitive_column}': need at least two groups with at "
+            f"least {check_config.bias.min_group_size} non-missing rows; found {len(stats)}."
+        )
+
+    # Reference = highest favorable rate; worst-off = lowest. Ties are broken
+    # by group name so repeated runs produce the same report.
+    ordered = sorted(stats, key=lambda item: (-item["rate"], item["group"]))
+    reference = ordered[0]
+    worst = ordered[-1]
+
+    if reference["rate"] <= 0:
+        return _skip(
+            f"Skipped '{sensitive_column}': all eligible groups have a 0% "
+            "favorable rate, so disparate impact is undefined."
+        )
+
+    disparate_impact = worst["rate"] / reference["rate"]
+    rate_difference = (reference["rate"] - worst["rate"]) * 100
+
+    # No material disparity: nothing to report.
+    if disparate_impact >= check_config.bias.di_medium:
+        return []
+
+    contingency = [[item["favorable"], item["n"] - item["favorable"]] for item in ordered]
+    try:
+        _, p_value, _, expected = chi2_contingency(contingency)
+    except Exception as exc:  # noqa: BLE001 - scipy validates the table
+        return _skip(
+            f"Skipped '{sensitive_column}': could not compute the chi-square "
+            f"p-value ({type(exc).__name__}: {exc})."
+        )
+
+    # A visible difference in a small sample is not enough evidence.
+    if p_value >= check_config.bias.p_value_limit:
+        return [
+            info_note(
+                "bias",
+                f"Not flagged: observed an apparent disparity for "
+                f"'{sensitive_column}' (disparate impact "
+                f"{disparate_impact:.3f}, rate difference "
+                f"{rate_difference:.2f} percentage points), but the "
+                f"chi-square p-value {p_value:.3e} is not below "
+                f"{check_config.bias.p_value_limit}. With this sample size the difference is "
+                "not statistically significant.",
+            )
+        ]
+
+    if disparate_impact < check_config.bias.di_critical:
+        severity = Severity.CRITICAL
+    elif disparate_impact < check_config.bias.di_high:
+        severity = Severity.HIGH
+    else:
+        severity = Severity.MEDIUM
+
+    group_text = "; ".join(
+        f"{item['group']}: {item['rate'] * 100:.2f}% (n={item['n']})"
+        for item in ordered
+    )
+
+    notes: list[str] = []
+    if dropped_rows:
+        notes.append(
+            f"Dropped {dropped_rows} row(s) with missing target or "
+            "sensitive values."
+        )
+    if dropped_small_groups:
+        notes.append(
+            f"Dropped {dropped_small_groups} group(s) smaller than "
+            f"{check_config.bias.min_group_size}."
+        )
+    if inferred_favorable:
+        notes.append(
+            "Favorable outcome was inferred because no favorable_value was "
+            "provided."
+        )
+    if (expected < 5).any():
+        notes.append(
+            "Some expected cell counts are below 5; the p-value is "
+            "approximate."
+        )
+    note_text = (" " + " ".join(notes)) if notes else ""
+
+    evidence = (
+        f"Fairness check for sensitive column '{sensitive_column}' "
+        f"(target '{target_column}', favorable outcome '{favorable_value}'): "
+        f"group rates: {group_text}. "
+        f"Reference group (highest rate): '{reference['group']}' at "
+        f"{reference['rate'] * 100:.2f}%; worst-off group: "
+        f"'{worst['group']}' at {worst['rate'] * 100:.2f}%. "
+        f"Rate difference: {rate_difference:.2f} percentage points. "
+        f"Disparate impact ratio: {disparate_impact:.3f}. "
+        f"Chi-square p-value: {p_value:.3e} (threshold {check_config.bias.p_value_limit}). "
+        f"Minimum group size: {check_config.bias.min_group_size}."
+        f"{note_text}"
+    )
+
+    return [
+        Finding(
+            check_name="bias",
+            severity=severity,
+            evidence=evidence,
+            affected_columns=[str(sensitive_column)],
+            confidence=0.9,
+        )
+    ]
+
+
+@register_check(
+    name="bias",
+    required=("csv_path", "target_column"),
+    optional=("sensitive_columns", "favorable_value"),
+    target_types=("binary", "boolean"),
+    severity_key="fairness",
+    description=(
+        "Fairness check: compares favorable outcome rates across "
+        "user-specified sensitive groups."
+    ),
+    # Fairness must never invent sensitive columns in the fallback.
+    fallback=False,
+    param_types=(
+        ("sensitive_columns", list[str]),
+        ("favorable_value", str),
+    ),
+)
 def bias_check(
-    csv_path: str,
+    df: pd.DataFrame,
     target_column: Optional[str] = None,
     sensitive_columns: Optional[list[str]] = None,
+    favorable_value: object | None = None,
 ) -> list[Finding]:
-    """Detect potential bias: a sensitive attribute that alone predicts the target.
+    """Compare favorable outcome rates across user-specified sensitive groups.
 
     Args:
-        csv_path: Path to the CSV file.
-        target_column: Name of the target column (required).
-        sensitive_columns: Columns to test for bias. If None, candidate
-            sensitive columns are auto-detected (low-cardinality string
-            columns that are not the target).
+        df: The pre-loaded DataFrame.
+        target_column: Binary or boolean target column.
+        sensitive_columns: Sensitive columns to compare. Required; the check
+            never selects columns on its own.
+        favorable_value: Value of the target that counts as a favorable
+            outcome. Optional for boolean targets and 0/1 numeric targets,
+            where it is inferred.
 
     Returns:
-        A list of Finding objects. Empty list means no bias detected.
-        For classification, findings are based on cross-validated ROC AUC.
-        For regression, findings are based on cross-validated R^2.
+        Fairness findings, or informational notes for every skip.
     """
     if not target_column:
-        return [
-            Finding(
-                check_name="bias",
-                severity=Severity.MEDIUM,
-                evidence="No target_column configured; cannot run bias check.",
-                affected_columns=[],
-                suggested_fix="Provide the target column name.",
-                confidence=1.0,
-            )
-        ]
-
-    try:
-        df = pd.read_csv(csv_path)
-    except Exception as exc:
-        return [
-            Finding(
-                check_name="bias",
-                severity=Severity.HIGH,
-                evidence=f"Failed to read CSV: {exc}",
-                affected_columns=[],
-                suggested_fix="Verify the file path and format.",
-                confidence=1.0,
-            )
-        ]
+        return _skip(
+            "Skipped: no target_column was provided; fairness needs a binary "
+            "target and a favorable outcome."
+        )
 
     if target_column not in df.columns:
-        return [
-            Finding(
-                check_name="bias",
-                severity=Severity.MEDIUM,
-                evidence=f"Target column '{target_column}' not found in CSV.",
-                affected_columns=[],
-                suggested_fix="Provide the correct target column name.",
-                confidence=1.0,
-            )
-        ]
+        return _skip(
+            f"Skipped: target column '{target_column}' was not found in the "
+            "CSV."
+        )
 
-    n_rows = len(df)
-    if n_rows == 0:
-        return []
+    if df.empty:
+        return _skip("Skipped: the dataset is empty.")
 
-    y = df[target_column]
-    is_continuous = _is_continuous_target(y)
+    target = df[target_column]
+    target_type = detect_target_type(target)
+    if target_type not in ("binary", "boolean"):
+        return _skip(
+            f"Skipped: fairness supports binary or boolean targets only; "
+            f"target '{target_column}' is {target_type}."
+        )
 
-    # Determine which sensitive columns to test.
-    if sensitive_columns is not None:
-        candidate_cols = [c for c in sensitive_columns if c in df.columns]
-    else:
-        candidate_cols = _auto_detect_sensitive_columns(df, target_column)
+    if not sensitive_columns:
+        hints = _hint_candidates(df, target_column)
+        hint_text = (
+            f" Name-based hints (not analysed): {', '.join(hints)}."
+            if hints
+            else " No name-based hints were found."
+        )
+        return _skip(
+            "Skipped: no sensitive columns were specified. Fairness only runs "
+            "on user-specified columns."
+            f"{hint_text} Pass sensitive_columns via check_params['bias'] or "
+            "--sensitive."
+        )
+
+    if isinstance(sensitive_columns, str):
+        sensitive_columns = [sensitive_columns]
+
+    requested: list[str] = []
+    for column in sensitive_columns:
+        if column not in requested:
+            requested.append(column)
 
     findings: list[Finding] = []
-
-    if is_continuous:
-        # --- Regression path: cross-validated R^2 ---
-        if not pd.api.types.is_numeric_dtype(y):
-            return []
-        y_values = y.values.astype(float)
-        cv = KFold(n_splits=_CV_FOLDS, shuffle=True, random_state=42)
-        scorer_name = "r2"
-
-        for col in candidate_cols:
-            series = df[col]
-
-            # Constant column: can't train.
-            if series.nunique(dropna=True) < 2:
-                continue
-
-            try:
-                pipeline = _build_column_pipeline(series, regression=True)
-                X = np.asarray(series).reshape(-1, 1)
-                scores = cross_val_score(
-                    pipeline, X, y_values, cv=cv, scoring=scorer_name
-                )
-                # NaN-aware aggregation (undefined R^2 on tiny folds).
-                scores = scores[~np.isnan(scores)]
-                if len(scores) == 0:
-                    continue
-                r2_mean = float(np.mean(scores))
-                r2_std = float(np.std(scores))
-            except Exception:
-                continue
-
-            if r2_mean >= _CRITICAL_R2:
-                severity = Severity.CRITICAL
-            elif r2_mean >= _HIGH_R2:
-                severity = Severity.HIGH
-            elif r2_mean >= _MEDIUM_R2:
-                severity = Severity.MEDIUM
-            else:
-                continue  # No bias flag
-
-            findings.append(
-                Finding(
-                    check_name="bias",
-                    severity=severity,
-                    evidence=(
-                        f"Sensitive column '{col}' alone predicts target "
-                        f"'{target_column}' with R^2 {r2_mean:.4f} ± {r2_std:.4f} "
-                        f"({_CV_FOLDS}-fold CV). A sensitive attribute should "
-                        "not carry this much signal about the outcome."
-                    ),
-                    affected_columns=[col],
-                    suggested_fix=(
-                        f"Review '{col}' as a feature. Consider removing it, "
-                        "applying fairness mitigation, or collecting more "
-                        "balanced data."
-                    ),
-                    confidence=0.85,
-                )
+    valid = [column for column in requested if column in df.columns]
+    missing = [column for column in requested if column not in df.columns]
+    if missing:
+        findings.append(
+            info_note(
+                "bias",
+                "Skipped: sensitive column(s) not found: "
+                f"{', '.join(str(column) for column in missing)}.",
             )
+        )
 
+    if not valid:
+        return findings or _skip("Skipped: no valid sensitive columns were provided.")
+
+    favorable, inferred, error = _resolve_favorable_value(target, favorable_value)
+    if error:
+        findings.append(info_note("bias", error))
         return findings
 
-    # --- Classification path: cross-validated ROC AUC ---
-    # Encode target once for the model.
-    if not pd.api.types.is_numeric_dtype(y):
-        y_values = LabelEncoder().fit_transform(y.astype(str))
-    else:
-        y_values = y.values
-
-    n_classes = len(set(y_values.tolist()))
-    if n_classes < 2:
-        return []
-
-    cv = StratifiedKFold(n_splits=_CV_FOLDS, shuffle=True, random_state=42)
-    scorer_name = "roc_auc" if n_classes <= 2 else "roc_auc_ovr"
-
-    # Stratified CV can't have more folds than the smallest class size.
-    class_counts = pd.Series(y_values).value_counts()
-    min_class_size = int(class_counts.min())
-    actual_n_splits = min(_CV_FOLDS, min_class_size)
-    if actual_n_splits < 2:
-        return []
-    cv = StratifiedKFold(n_splits=actual_n_splits, shuffle=True, random_state=42)
-
-    for col in candidate_cols:
-        series = df[col]
-
-        # Constant column: can't train.
-        if series.nunique(dropna=True) < 2:
-            continue
-
-        try:
-            pipeline = _build_column_pipeline(series, regression=False)
-            X = np.asarray(series).reshape(-1, 1)
-            scores = cross_val_score(
-                pipeline, X, y_values, cv=cv, scoring=scorer_name
+    for column in valid:
+        if column == target_column:
+            findings.append(
+                info_note(
+                    "bias",
+                    f"Skipped '{column}': the sensitive column is the target "
+                    "column.",
+                )
             )
-            # NaN-aware aggregation.
-            scores = scores[~np.isnan(scores)]
-            if len(scores) == 0:
-                continue
-            auc_mean = float(np.mean(scores))
-            auc_std = float(np.std(scores))
-        except Exception:
             continue
-
-        baseline_pct = _majority_baseline_pct(df[target_column])
-        lift = auc_mean - _RANDOM_AUC
-
-        if auc_mean >= _CRITICAL_AUC:
-            severity = Severity.CRITICAL
-        elif auc_mean >= _HIGH_AUC:
-            severity = Severity.HIGH
-        elif auc_mean >= _MEDIUM_AUC:
-            severity = Severity.MEDIUM
-        else:
-            continue  # No bias flag
-
-        findings.append(
-            Finding(
-                check_name="bias",
-                severity=severity,
-                evidence=(
-                    f"Sensitive column '{col}' alone predicts target "
-                    f"'{target_column}' with ROC AUC {auc_mean:.4f} ± {auc_std:.4f} "
-                    f"({actual_n_splits}-fold stratified CV). Majority-class baseline: "
-                    f"{baseline_pct:.1f}%. Lift over random (0.5000): {lift:+.4f}. "
-                    "A sensitive attribute should not carry this much signal "
-                    "about the outcome — it may introduce unfair bias."
-                ),
-                affected_columns=[col],
-                suggested_fix=(
-                    f"Review '{col}' as a feature. Consider removing it, "
-                    "applying fairness mitigation, or collecting more "
-                    "balanced data."
-                ),
-                confidence=0.85,
+        findings.extend(
+            _check_one_column(
+                df,
+                column,
+                target_column,
+                favorable,
+                inferred,
             )
         )
 
     return findings
 
 
-__all__ = ["bias_check"]
+__all__ = [
+    "bias_check",
+    "SENSITIVE_NAME_HINTS",
+]

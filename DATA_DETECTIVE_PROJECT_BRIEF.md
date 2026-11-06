@@ -136,7 +136,6 @@ Tick each box when done and update section 1.
 - [ ] **M3 — Conditional routing:** a flagged check triggers a deeper leakage test
 - [ ] **M4 — LLM with tools (ReAct) and structured output:** the agent chooses which checks to call and returns `Finding` objects
 - [ ] **M5 — Persistence and memory:** Postgres checkpointer, saved audit history, resume and replay a run
-- [ ] **M6 — Human-in-the-loop:** pause and ask for approval before applying a fix
 - [ ] **M7 — Backend:** FastAPI endpoints (start audit, check status, get report), Postgres tables, Docker
 - [ ] **M8 — Evaluation and tracing:** planted-problem test sets, detection score, tracing dashboard
 - [ ] **M9 — Polish:** README, architecture diagram, demo video, CV bullets

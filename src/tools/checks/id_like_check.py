@@ -13,23 +13,18 @@ from typing import Optional
 import pandas as pd
 
 from src.schemas.finding import Finding, Severity
+from src.tools.checks.registry import register_check
 
 
-def id_like_check(csv_path: str, target_column: Optional[str] = None) -> list[Finding]:
+@register_check(
+    name="id_like",
+    required=("csv_path",),
+    severity_key="id_like",
+    description="Check for ID-like columns that are unique per row.",
+    target_hint=True,
+)
+def id_like_check(df: pd.DataFrame, target_column: Optional[str] = None) -> list[Finding]:
     """Detect columns that are unique per row (likely identifiers)."""
-    try:
-        df = pd.read_csv(csv_path)
-    except Exception as exc:  # noqa: BLE001 — wrapper safety
-        return [
-            Finding(
-                check_name="id_like",
-                severity=Severity.HIGH,
-                evidence=f"Failed to read CSV: {exc}",
-                affected_columns=[],
-                suggested_fix="Verify the file path and format.",
-                confidence=1.0,
-            )
-        ]
 
     n_rows = len(df)
     if n_rows == 0:
@@ -52,10 +47,6 @@ def id_like_check(csv_path: str, target_column: Optional[str] = None) -> list[Fi
                         "and should not be used as a feature."
                     ),
                     affected_columns=[col],
-                    suggested_fix=(
-                        "Drop this column from the feature set unless "
-                        "it is the target."
-                    ),
                     confidence=0.85,
                 )
             )

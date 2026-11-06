@@ -2,6 +2,7 @@
 pandas>=2.2.0
 numpy>=1.26.0
 scikit-learn>=1.4.0
+scipy>=1.10.0               # fairness chi-square test (M2 bias check)
 
 # ===== LangGraph / LangChain (agent framework, M1-M4) =====
 langgraph>=0.2.0

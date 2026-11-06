@@ -4,7 +4,6 @@ Builds the chat model from settings in `.env`.
 """
 
 from functools import lru_cache
-from typing import Any
 
 from langchain_core.language_models import BaseChatModel
 
@@ -35,18 +34,10 @@ def get_llm() -> BaseChatModel:
     )
 
 
-def get_structured_llm(schema: type) -> Any:
-    """Return an LLM bound to a Pydantic schema for structured output.
-
-    The model must return data matching ``schema`` instead of free text.
-    """
-    return get_llm().with_structured_output(schema)
-
-
 @lru_cache
 def get_cached_llm() -> BaseChatModel:
     """Cached LLM instance (one client per process)."""
     return get_llm()
 
 
-__all__ = ["get_llm", "get_structured_llm", "get_cached_llm"]
+__all__ = ["get_llm", "get_cached_llm"]

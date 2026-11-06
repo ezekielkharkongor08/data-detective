@@ -9,7 +9,9 @@ from typing import Any
 
 import pandas as pd
 
+from src.tools.csv_reader import read_csv_robust
 from src.tools.missing_markers import count_missing
+from src.tools.target_type import detect_target_type
 
 
 def _profile_column(series: pd.Series) -> dict[str, Any]:
@@ -65,11 +67,23 @@ def _profile_column(series: pd.Series) -> dict[str, Any]:
     return col_info
 
 
-def profile_dataset(csv_path: str | Path) -> dict[str, Any]:
+def profile_dataset(
+    csv_path: str | Path,
+    target_column: str | None = None,
+) -> dict[str, Any]:
     """Build a compact profile of a CSV dataset.
-    
+
+    Args:
+        csv_path: Path to the CSV file.
+        target_column: Optional target column. When it exists, the profile
+            reports its ``target_type`` so checks can decide whether they
+            apply (for example, fairness only supports classification
+            targets).
+
+    Returns:
+        A JSON-friendly profile dict.
     """
-    df = pd.read_csv(csv_path)
+    df = read_csv_robust(csv_path)
 
     profile: dict[str, Any] = {
         "n_rows": int(len(df)),
@@ -83,6 +97,13 @@ def profile_dataset(csv_path: str | Path) -> dict[str, Any]:
         columns.append(_profile_column(series))
 
     profile["columns"] = columns
+
+    # Target type is a hint for the check registry. An absent or unknown
+    # target is reported as "unknown"; individual checks decide what to do.
+    if target_column and target_column in df.columns:
+        profile["target_type"] = detect_target_type(df[target_column])
+    else:
+        profile["target_type"] = "unknown"
 
     # First few rows as records (compact sample for the LLM)
     profile["sample_rows"] = df.head(3).to_dict(orient="records")

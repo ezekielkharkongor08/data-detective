@@ -5,7 +5,6 @@ no problem was found.
 """
 
 from enum import Enum
-from typing import Optional
 
 from pydantic import BaseModel, Field
 
@@ -28,7 +27,6 @@ class Finding(BaseModel):
         severity: Severity level (see :class:`Severity`).
         evidence: Human-readable description of the evidence.
         affected_columns: Columns involved in the finding.
-        suggested_fix: Recommended action to remediate.
         confidence: Confidence score from 0.0 to 1.0.
     """
 
@@ -37,9 +35,6 @@ class Finding(BaseModel):
     evidence: str = Field(..., description="Human-readable description of the evidence.")
     affected_columns: list[str] = Field(
         default_factory=list, description="Columns involved in the finding."
-    )
-    suggested_fix: Optional[str] = Field(
-        default=None, description="Recommended action to remediate."
     )
     confidence: float = Field(
         default=1.0, description="Confidence score from 0.0 to 1.0.",

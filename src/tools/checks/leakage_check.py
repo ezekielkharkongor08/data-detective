@@ -32,37 +32,19 @@ from typing import Optional
 
 import numpy as np
 import pandas as pd
+from sklearn.dummy import DummyClassifier, DummyRegressor
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LinearRegression, LogisticRegression
 from sklearn.model_selection import KFold, StratifiedKFold, cross_val_score
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import LabelEncoder, OneHotEncoder
 
+from src.check_config import check_config
 from src.schemas.finding import Finding, Severity
+from src.tools.checks.registry import register_check
 
 
-# Cross-validation folds
-_CV_FOLDS = 5
-
-# Minimum rows required to run the leakage test.
-_MIN_ROWS = 10
-
-# High-cardinality threshold: columns with >= this fraction of unique values
-# are skipped; the ID-like check covers them.
-_HIGH_CARDINALITY_RATIO = 0.9
-
-# ROC AUC thresholds for single-column leakage (classification).
-_CRITICAL_AUC = 0.98
-_HIGH_AUC = 0.92
-_MEDIUM_AUC = 0.85
-
-# Random-guess AUC baseline.
-_RANDOM_AUC = 0.5
-
-# R^2 thresholds for single-column leakage (regression).
-_CRITICAL_R2 = 0.98
-_HIGH_R2 = 0.90
-_MEDIUM_R2 = 0.70
+# Check thresholds live in the shared config (check_config.leakage).
 
 
 def _is_continuous_target(y: pd.Series) -> bool:
@@ -121,18 +103,58 @@ def _majority_baseline_pct(y: pd.Series) -> float:
     return float(counts.iloc[0] * 100)
 
 
+def _compute_baseline_score(X: pd.Series, y: pd.Series, is_continuous: bool) -> float:
+    """Compute baseline score using a scikit-learn Dummy model.
+
+    Drops missing values from both X and y before fitting. The Dummy model
+    ignores X, so any feature column can be passed; only y drives the score.
+    """
+    valid = X.notna() & y.notna()
+    X_clean = X[valid]
+    y_clean = y[valid]
+
+    if len(y_clean) == 0:
+        return 0.0
+
+    # Convert to numpy to avoid ArrowStringArray reshape issues (pandas 3.x).
+    X_np = X_clean.to_numpy().reshape(-1, 1)
+
+    if is_continuous:
+        dummy = DummyRegressor(strategy="mean")
+        dummy.fit(X_np, y_clean.to_numpy().astype(float))
+        return float(dummy.score(X_np, y_clean.to_numpy().astype(float)))
+    else:
+        dummy = DummyClassifier(strategy="prior")
+        dummy.fit(X_np, y_clean.to_numpy())
+        return float(dummy.score(X_np, y_clean.to_numpy()))
+
+
+@register_check(
+    name="target_leakage",
+    required=("csv_path", "target_column"),
+    optional=("suspicious_columns",),
+    severity_key="target_leakage",
+    description="Deep leakage check: does any single column alone predict the target?",
+    target_hint=True,
+    # Runs in the router-triggered deep_checks step, not the parallel fan-out.
+    parallel=False,
+    tool_name="run_leakage_check",
+    param_types=(("suspicious_columns", list[str]),),
+)
 def leakage_check(
-    csv_path: str,
+    df: pd.DataFrame,
     target_column: Optional[str] = None,
     suspicious_columns: Optional[list[str]] = None,
 ) -> list[Finding]:
     """Detect target leakage: a feature that alone predicts the target too well.
 
     Args:
-        csv_path: Path to the CSV file.
+        df: The pre-loaded DataFrame.
         target_column: Name of the target column (required).
         suspicious_columns: Columns to test for leakage. If None, all
-            non-target columns are considered.
+            non-target columns are considered. When provided (for example
+            from the router's suspect columns), the CV loop runs only on
+            these columns, avoiding an expensive scan of every column.
 
     Returns:
         A list of Finding objects. Empty list means no leakage detected.
@@ -146,21 +168,6 @@ def leakage_check(
                 severity=Severity.MEDIUM,
                 evidence="No target_column configured; cannot run leakage check.",
                 affected_columns=[],
-                suggested_fix="Provide the target column name.",
-                confidence=1.0,
-            )
-        ]
-
-    try:
-        df = pd.read_csv(csv_path)
-    except Exception as exc:
-        return [
-            Finding(
-                check_name="target_leakage",
-                severity=Severity.HIGH,
-                evidence=f"Failed to read CSV: {exc}",
-                affected_columns=[],
-                suggested_fix="Verify the file path and format.",
                 confidence=1.0,
             )
         ]
@@ -172,7 +179,6 @@ def leakage_check(
                 severity=Severity.MEDIUM,
                 evidence=f"Target column '{target_column}' not found in CSV.",
                 affected_columns=[],
-                suggested_fix="Provide the correct target column name.",
                 confidence=1.0,
             )
         ]
@@ -180,6 +186,17 @@ def leakage_check(
     n_rows = len(df)
     if n_rows == 0:
         return []
+
+    # Sample large datasets before CV so the check stays fast. The sample is
+    # noted in the evidence so the user knows results are approximate.
+    sampled = False
+    if n_rows > check_config.leakage.max_rows_for_cv:
+        df = df.sample(
+            n=check_config.leakage.max_rows_for_cv,
+            random_state=check_config.leakage.cv_random_state,
+        )
+        sampled = True
+        n_rows = len(df)
 
     y = df[target_column]
     is_continuous = _is_continuous_target(y)
@@ -190,6 +207,14 @@ def leakage_check(
     else:
         candidate_cols = [c for c in suspicious_columns if c in df.columns]
 
+    # Compute baseline score once using a Dummy model (same for all columns
+    # since Dummy ignores X). Use first candidate column as X.
+    baseline_score = 0.0
+    if candidate_cols:
+        baseline_score = _compute_baseline_score(
+            df[candidate_cols[0]], y, is_continuous
+        )
+
     findings: list[Finding] = []
 
     if is_continuous:
@@ -198,7 +223,11 @@ def leakage_check(
             # Should not happen (_is_continuous_target checks this), but guard.
             return []
         y_values = y.values.astype(float)
-        cv = KFold(n_splits=_CV_FOLDS, shuffle=True, random_state=42)
+        cv = KFold(
+            n_splits=check_config.leakage.cv_folds,
+            shuffle=True,
+            random_state=check_config.leakage.cv_random_state,
+        )
         scorer_name = "r2"
 
         for col in candidate_cols:
@@ -211,7 +240,7 @@ def leakage_check(
             # High-cardinality column: skip on larger datasets (ID-like check
             # covers them). On small datasets the ratio is not meaningful.
             unique_ratio = series.nunique(dropna=True) / n_rows
-            if n_rows >= 50 and unique_ratio >= _HIGH_CARDINALITY_RATIO:
+            if n_rows >= 50 and unique_ratio >= check_config.leakage.high_cardinality_ratio:
                 continue
 
             try:
@@ -230,15 +259,23 @@ def leakage_check(
             except Exception:
                 continue
 
-            if r2_mean >= _CRITICAL_R2:
+            if r2_mean >= check_config.leakage.critical_r2:
                 severity = Severity.CRITICAL
-            elif r2_mean >= _HIGH_R2:
+            elif r2_mean >= check_config.leakage.high_r2:
                 severity = Severity.HIGH
-            elif r2_mean >= _MEDIUM_R2:
+            elif r2_mean >= check_config.leakage.medium_r2:
                 severity = Severity.MEDIUM
             else:
                 continue  # No leakage flag
 
+            # Sampling note appended to evidence so users know results are
+            # approximate when the dataset was downsampled for CV.
+            sample_note = (
+                f"Dataset was sampled to {check_config.leakage.max_rows_for_cv} "
+                "rows before CV, so the score is approximate. "
+                if sampled
+                else ""
+            )
             findings.append(
                 Finding(
                     check_name="target_leakage",
@@ -246,15 +283,14 @@ def leakage_check(
                     evidence=(
                         f"Column '{col}' alone predicts target '{target_column}' "
                         f"with R^2 {r2_mean:.4f} ± {r2_std:.4f} "
-                        f"({_CV_FOLDS}-fold CV). Baseline R^2 (predict mean): "
-                        f"0.0000. A single feature should not explain this "
+                        f"({check_config.leakage.cv_folds}-fold CV, random_state "
+                        f"{check_config.leakage.cv_random_state}). "
+                        f"{sample_note}"
+                        f"Baseline R^2 (predict mean): "
+                        f"{baseline_score:.4f}. A single feature should not explain this "
                         "much of the target -- it likely leaks the answer."
                     ),
                     affected_columns=[col],
-                    suggested_fix=(
-                        f"Review '{col}' and remove it from the feature set if "
-                        "it would not be available at prediction time."
-                    ),
                     confidence=0.9,
                 )
             )
@@ -272,16 +308,22 @@ def leakage_check(
     if n_classes < 2:
         return []
 
-    cv = StratifiedKFold(n_splits=_CV_FOLDS, shuffle=True, random_state=42)
+    cv = StratifiedKFold(
+        n_splits=check_config.leakage.cv_folds,
+        shuffle=True,
+        random_state=check_config.leakage.cv_random_state,
+    )
     scorer_name = "roc_auc" if n_classes <= 2 else "roc_auc_ovr"
 
     # Stratified CV can't have more folds than the smallest class size.
     class_counts = pd.Series(y_values).value_counts()
     min_class_size = int(class_counts.min())
-    actual_n_splits = min(_CV_FOLDS, min_class_size)
+    actual_n_splits = min(check_config.leakage.cv_folds, min_class_size)
     if actual_n_splits < 2:
         return []
-    cv = StratifiedKFold(n_splits=actual_n_splits, shuffle=True, random_state=42)
+    cv = StratifiedKFold(
+        n_splits=actual_n_splits, shuffle=True, random_state=check_config.leakage.cv_random_state
+    )
 
     for col in candidate_cols:
         series = df[col]
@@ -293,7 +335,7 @@ def leakage_check(
         # High-cardinality column: skip on larger datasets (ID-like check
         # covers them). On small datasets the ratio is not meaningful.
         unique_ratio = series.nunique(dropna=True) / n_rows
-        if n_rows >= 50 and unique_ratio >= _HIGH_CARDINALITY_RATIO:
+        if n_rows >= 50 and unique_ratio >= check_config.leakage.high_cardinality_ratio:
             continue
 
         try:
@@ -313,18 +355,26 @@ def leakage_check(
             # If the model can't train or score on this column, skip it.
             continue
 
-        baseline_pct = _majority_baseline_pct(df[target_column])
-        lift = auc_mean - _RANDOM_AUC
+        baseline_score_cls = baseline_score
+        lift = auc_mean - check_config.leakage.random_auc
 
-        if auc_mean >= _CRITICAL_AUC:
+        if auc_mean >= check_config.leakage.critical_auc:
             severity = Severity.CRITICAL
-        elif auc_mean >= _HIGH_AUC:
+        elif auc_mean >= check_config.leakage.high_auc:
             severity = Severity.HIGH
-        elif auc_mean >= _MEDIUM_AUC:
+        elif auc_mean >= check_config.leakage.medium_auc:
             severity = Severity.MEDIUM
         else:
             continue  # No leakage flag
 
+        # Sampling note appended to evidence so users know results are
+        # approximate when the dataset was downsampled for CV.
+        sample_note = (
+            f"Dataset was sampled to {check_config.leakage.max_rows_for_cv} "
+            "rows before CV, so the score is approximate. "
+            if sampled
+            else ""
+        )
         findings.append(
             Finding(
                 check_name="target_leakage",
@@ -332,17 +382,15 @@ def leakage_check(
                 evidence=(
                     f"Column '{col}' alone predicts target '{target_column}' "
                     f"with ROC AUC {auc_mean:.4f} ± {auc_std:.4f} "
-                    f"({actual_n_splits}-fold stratified CV). Majority-class "
-                    f"baseline: {baseline_pct:.1f}%. Lift over random "
-                    f"(0.5000): {lift:+.4f}. A single feature should not "
+                    f"({actual_n_splits}-fold stratified CV, random_state "
+                    f"{check_config.leakage.cv_random_state}). "
+                    f"{sample_note}"
+                    f"Baseline accuracy (prior): {baseline_score_cls:.4f}. "
+                    f"Lift over random (0.5000): {lift:+.4f}. A single feature should not "
                     "predict the target this well -- it likely leaks the "
                     "answer."
                 ),
                 affected_columns=[col],
-                suggested_fix=(
-                    f"Review '{col}' and remove it from the feature set if "
-                    "it would not be available at prediction time."
-                ),
                 confidence=0.9,
             )
         )

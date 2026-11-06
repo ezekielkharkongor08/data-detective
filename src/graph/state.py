@@ -4,8 +4,9 @@ State holds IDs, file paths, and findings — never a DataFrame.
 Tools load the CSV from disk when needed.
 """
 
-from operator import add
 from typing import Annotated, Optional, TypedDict
+
+from src.graph.reducers import merge_findings
 
 
 class GraphState(TypedDict, total=False):
@@ -23,9 +24,16 @@ class GraphState(TypedDict, total=False):
     target_column: Optional[str]
     profile: Optional[dict]
 
-    # Merged findings from all parallel checks. ``operator.add`` is the
-    # reducer: LangGraph concatenates lists returned by parallel branches.
-    findings: Annotated[list[dict], add]
+    # Per-check parameters, keyed by check name. Example:
+    #   check_params["bias"] = {"sensitive_columns": ["sex"], "favorable_value": ">50K"}
+    # Checks declare which keys they read; the registry only passes the ones
+    # declared, so adding a check needs no state-field changes.
+    check_params: dict[str, dict]
+
+    # Merged findings from all parallel checks. ``merge_findings`` is the
+    # reducer: it concatenates lists returned by parallel branches and drops
+    # duplicates, so a repeated finding can never appear twice in the report.
+    findings: Annotated[list[dict], merge_findings]
 
     # Set by the router when a finding suggests potential leakage.
     leakage_suspected: Optional[bool]

@@ -127,7 +127,6 @@ def save_run(
                         severity=f.get("severity", "info"),
                         evidence=f.get("evidence", ""),
                         affected_columns=f.get("affected_columns", []),
-                        suggested_fix=f.get("suggested_fix"),
                         confidence=int(float(f.get("confidence", 1.0)) * 100),
                     )
                 )

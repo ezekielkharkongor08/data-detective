@@ -14,24 +14,20 @@ from typing import Optional
 import pandas as pd
 from pandas.api.types import is_string_dtype
 
+from src.check_config import check_config
 from src.schemas.finding import Finding, Severity
+from src.tools.checks.registry import register_check
 
 
-def schema_check(csv_path: str, target_column: Optional[str] = None) -> list[Finding]:
+@register_check(
+    name="schema",
+    required=("csv_path",),
+    severity_key="schema",
+    description="Check for schema problems such as numbers stored as text.",
+    always=True,
+)
+def schema_check(df: pd.DataFrame, target_column: Optional[str] = None) -> list[Finding]:
     """Detect numbers stored as text and mixed-type columns."""
-    try:
-        df = pd.read_csv(csv_path)
-    except Exception as exc: 
-        return [
-            Finding(
-                check_name="schema",
-                severity=Severity.HIGH,
-                evidence=f"Failed to read CSV: {exc}",
-                affected_columns=[],
-                suggested_fix="Verify the file path and format.",
-                confidence=1.0,
-            )
-        ]
 
     findings: list[Finding] = []
 
@@ -46,7 +42,7 @@ def schema_check(csv_path: str, target_column: Optional[str] = None) -> list[Fin
                 continue
             numeric_like = pd.to_numeric(non_null, errors="coerce").notna()
             numeric_pct = float(numeric_like.mean())
-            if numeric_pct > 0.8:
+            if numeric_pct > check_config.schema.numeric_pct_threshold:
                 findings.append(
                     Finding(
                         check_name="schema",
@@ -57,10 +53,6 @@ def schema_check(csv_path: str, target_column: Optional[str] = None) -> list[Fin
                             "look numeric."
                         ),
                         affected_columns=[col],
-                        suggested_fix=(
-                            "Convert the column to a numeric type "
-                            "(e.g., pd.to_numeric)."
-                        ),
                         confidence=0.9,
                     )
                 )

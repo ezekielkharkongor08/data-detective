@@ -1,30 +1,24 @@
-"""LangChain tool wrappers around the pandas checks.
+"""LangChain tools generated from the check registry.
 
-Each tool has a name, a docstring the LLM reads to decide when to call it,
-and typed arguments. Tools return the checks' findings as JSON strings so
-they can travel through the agent's message history.
+Every registered check that declares ``agent_tool=True`` becomes one tool.
+The tool name, description, and argument schema all come from the check's
+metadata, so adding a check never requires editing this file.
 
-The LLM only ever receives these results and the compact profile — never the
-full CSV (design rule #1).
+Tools return the checks' findings as JSON strings so they can travel through
+the agent's message history. The LLM only ever receives these results and the
+compact profile — never the full CSV (design rule #1).
 """
 
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, Optional
 
-from langchain_core.tools import tool
+from langchain_core.tools import StructuredTool
+from pydantic import Field, create_model
 
 from src.schemas.finding import Finding
-from src.tools.checks import (
-    duplicates_check,
-    id_like_check,
-    imbalance_check,
-    missing_check,
-    schema_check,
-)
-from src.tools.checks.bias_check import bias_check
-from src.tools.checks.leakage_check import leakage_check
+from src.tools.checks import CheckSpec, error_finding, get_checks, run_check
 
 
 def _serialize(findings: list[Finding]) -> str:
@@ -48,100 +42,101 @@ def _parse(content: Any) -> list[Finding]:
     return [Finding.model_validate(item) for item in data]
 
 
-@tool
-def run_duplicates_check(csv_path: str) -> str:
-    """Check a CSV for duplicate rows.
+def _field_type(spec: CheckSpec, key: str) -> type:
+    """Return the schema type for one tool argument.
 
-    Flags MEDIUM when duplicates exist and HIGH when more than 10% of rows
-    are duplicates. Returns findings as JSON (empty list means clean).
+    Optional arguments are wrapped in ``Optional`` so the model may omit them.
     """
-    return _serialize(duplicates_check(csv_path))
+    typ = spec.param_type(key)
+    return typ if key in spec.required else Optional[typ]
 
 
-@tool
-def run_missing_check(csv_path: str) -> str:
-    """Check a CSV for missing values (NaN, blanks, and '?' markers).
+def _args_schema(spec: CheckSpec) -> type:
+    """Build a pydantic model describing the tool's arguments.
 
-    Flags LOW above 0%, HIGH above 20%, and CRITICAL above 50% missing in a
-    column. Returns findings as JSON (empty list means clean).
+    Every check receives ``csv_path`` and ``target_column``; target-required
+    checks require the target, the rest accept it as an optional hint.
     """
-    return _serialize(missing_check(csv_path))
+    required_keys = list(spec.required)
+    if "csv_path" not in required_keys:
+        required_keys.insert(0, "csv_path")
+
+    optional_keys = list(spec.optional)
+    if "target_column" not in required_keys and "target_column" not in optional_keys:
+        optional_keys.insert(0, "target_column")
+
+    fields: dict[str, tuple[type, Any]] = {}
+
+    for key in required_keys:
+        fields[key] = (
+            _field_type(spec, key),
+            Field(..., description=f"Required input for the {spec.name} check."),
+        )
+    for key in optional_keys:
+        fields[key] = (
+            _field_type(spec, key),
+            Field(None, description=f"Optional parameter for the {spec.name} check."),
+        )
+
+    return create_model(f"{spec.name.title().replace('_', '')}Args", **fields)
 
 
-@tool
-def run_schema_check(csv_path: str) -> str:
-    """Check a CSV for schema problems such as numbers stored as text.
+def _make_runner(spec: CheckSpec):
+    """Create the function behind one generated tool."""
 
-    Flags MEDIUM when a text column is mostly numeric. Returns findings as
-    JSON (empty list means clean).
-    """
-    return _serialize(schema_check(csv_path))
+    def _run(**kwargs: Any) -> str:
+        # Build the same minimal state the registry expects, so tools and the
+        # graph share one contract (required inputs, params, target gating).
+        state: dict[str, Any] = {
+            "csv_path": kwargs.get("csv_path"),
+            "target_column": kwargs.get("target_column"),
+        }
+        for key in spec.required:
+            if key not in state:
+                state[key] = kwargs.get(key)
+        params = {
+            key: kwargs[key]
+            for key in spec.optional
+            if kwargs.get(key) is not None
+        }
+        state["check_params"] = {spec.name: params}
 
+        try:
+            findings = run_check(spec, state)
+        except Exception as exc:  # noqa: BLE001 — a tool must not crash the agent
+            findings = [error_finding(spec.name, exc)]
+        return _serialize(findings)
 
-@tool
-def run_imbalance_check(csv_path: str, target_column: str) -> str:
-    """Check the class balance of a classification target column.
-
-    Flags HIGH when the minority class is under 10% and MEDIUM under 30%.
-    Returns findings as JSON (empty list means balanced).
-    """
-    return _serialize(imbalance_check(csv_path, target_column=target_column or None))
-
-
-@tool
-def run_id_like_check(csv_path: str, target_column: str = "") -> str:
-    """Check for ID-like columns that are unique per row.
-
-    Flags MEDIUM for any non-target column with a unique value in every row.
-    Returns findings as JSON (empty list means clean).
-    """
-    return _serialize(id_like_check(csv_path, target_column=target_column or None))
-
-
-@tool
-def run_bias_check(csv_path: str, target_column: str = "") -> str:
-    """Bias / fairness check: does a sensitive attribute predict the target?
-
-    Auto-detects candidate sensitive columns (low-cardinality string columns
-    such as gender, race) and trains a baseline model using each one alone to
-    predict the target. Flags CRITICAL when a sensitive column alone reaches
-    >90% accuracy (classification) or R^2 > 0.70 (regression). Returns
-    findings as JSON (empty list means no bias detected).
-    """
-    return _serialize(bias_check(csv_path, target_column=target_column or None))
+    _run.__name__ = spec.agent_tool_name
+    return _run
 
 
-@tool
-def run_leakage_check(csv_path: str, target_column: str) -> str:
-    """Deep leakage check: does any single column alone predict the target?
+def _make_tool(spec: CheckSpec) -> StructuredTool:
+    """Build one LangChain tool from a registered check."""
+    description = spec.description or f"Run the {spec.name} check."
+    return StructuredTool.from_function(
+        func=_make_runner(spec),
+        name=spec.agent_tool_name,
+        description=(
+            f"{description} Returns findings as JSON "
+            "(an empty list means clean)."
+        ),
+        args_schema=_args_schema(spec),
+    )
 
-    Trains a quick baseline model per column and flags CRITICAL when a
-    column alone reaches >95% accuracy (classification) or R^2 > 0.90
-    (regression). Returns findings as JSON (empty list means no leakage).
-    """
-    return _serialize(leakage_check(csv_path, target_column=target_column or None))
 
-
-# Tools the agent may choose from (order is irrelevant to the LLM).
-ALL_TOOLS = [
-    run_duplicates_check,
-    run_missing_check,
-    run_schema_check,
-    run_imbalance_check,
-    run_id_like_check,
-    run_bias_check,
-    run_leakage_check,
+# Tools the agent may choose from. Order follows the registry.
+ALL_TOOLS: list[StructuredTool] = [
+    _make_tool(spec) for spec in get_checks(agent_tool=True)
 ]
 
+# Keep module-level names for backwards compatibility
+# (for example ``src.graph.tools.run_duplicates_check``).
+for _tool in ALL_TOOLS:
+    globals()[_tool.name] = _tool
 
 __all__ = [
-    "run_duplicates_check",
-    "run_missing_check",
-    "run_schema_check",
-    "run_imbalance_check",
-    "run_id_like_check",
-    "run_bias_check",
-    "run_leakage_check",
+    *(tool.name for tool in ALL_TOOLS),
     "ALL_TOOLS",
     "_parse",
     "_serialize",
