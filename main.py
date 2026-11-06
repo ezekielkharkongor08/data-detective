@@ -139,12 +139,12 @@ def main() -> None:
             print("(no audit runs found)")
             return
         print(
-            f"{'Run ID':<38s} | {'Status':<12s} | {'Approval':<11s} | {'Severity':<10s} | {'Findings':<9s} | CSV"
+            f"{'Run ID':<38s} | {'Status':<12s} | {'Severity':<10s} | {'Findings':<9s} | CSV"
         )
         print("-" * 120)
         for r in runs:
             print(
-                f"{r['run_id']:<38s} | {r['status']:<12s} | {r['approval_status']:<11s} | {r['overall_severity'] or '-':<10s} | {r['findings_count']:<9d} | {r['csv_path']}"
+                f"{r['run_id']:<38s} | {r['status']:<12s} | {r['overall_severity'] or '-':<10s} | {r['findings_count']:<9d} | {r['csv_path']}"
             )
         return
 

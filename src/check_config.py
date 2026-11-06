@@ -83,6 +83,22 @@ class TargetTypeConfig:
 
 
 @dataclass(frozen=True)
+class SkewnessConfig:
+    """Skewness check thresholds."""
+
+    skew_threshold: float = 1.0    # |skew| > 1.0 -> MEDIUM
+    high_skew_threshold: float = 2.0   # |skew| > 2.0 -> HIGH
+
+
+@dataclass(frozen=True)
+class OutlierConfig:
+    """Outlier check thresholds (IQR method)."""
+
+    outlier_pct_threshold: float = 5.0   # > 5% outliers -> MEDIUM
+    high_outlier_pct_threshold: float = 10.0   # > 10% outliers -> HIGH
+
+
+@dataclass(frozen=True)
 class CheckConfig:
     """All check thresholds grouped by check name."""
 
@@ -93,6 +109,8 @@ class CheckConfig:
     missing: MissingConfig = MissingConfig()
     duplicates: DuplicatesConfig = DuplicatesConfig()
     target_type: TargetTypeConfig = TargetTypeConfig()
+    skewness: SkewnessConfig = SkewnessConfig()
+    outliers: OutlierConfig = OutlierConfig()
 
 
 # Module-level instance used by all checks.
@@ -108,5 +126,7 @@ __all__ = [
     "MissingConfig",
     "DuplicatesConfig",
     "TargetTypeConfig",
+    "SkewnessConfig",
+    "OutlierConfig",
     "check_config",
 ]

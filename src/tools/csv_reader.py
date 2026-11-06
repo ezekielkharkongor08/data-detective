@@ -11,12 +11,17 @@ Real-world CSVs are not always UTF-8 comma-separated. This module provides
 
 Every check and the profiler use this instead of calling ``pd.read_csv``
 directly, so a weirdly-encoded or oddly-delimited CSV never crashes the audit.
+
+The CSV is loaded from disk at most once per unique file path (cached in
+memory via ``lru_cache``). Each caller receives an isolated copy so parallel
+LangGraph nodes cannot mutate the cached original.
 """
 
 from __future__ import annotations
 
 import csv
 import io
+from functools import lru_cache
 from typing import Optional
 
 import pandas as pd
@@ -52,12 +57,18 @@ def _detect_delimiter(sample: str) -> str:
     return best_delimiter
 
 
-def read_csv_robust(csv_path: str) -> pd.DataFrame:
-    """Read a CSV with encoding fallback and delimiter detection.
+@lru_cache(maxsize=3)
+def _read_csv_robust_impl(csv_path: str) -> pd.DataFrame:
+    """Read a CSV from disk with encoding fallback and delimiter detection.
 
-    Tries each encoding in turn. For the first encoding that decodes, it
-    sniffs the delimiter from the first 8KB and re-reads with that delimiter.
-    If every encoding fails, raises the last error.
+    This is the cached implementation. It performs all the heavy lifting
+    (encoding detection, BOM stripping, delimiter sniffing, and parsing)
+    exactly once per unique ``csv_path``. Subsequent calls for the same path
+    return the in-memory cached DataFrame, avoiding redundant disk I/O.
+
+    The caller receives the cached object directly; the public wrapper
+    :func:`read_csv_robust` returns an isolated copy so LangGraph nodes can
+    not mutate the cached original.
 
     Args:
         csv_path: Path to the CSV file.
@@ -70,7 +81,6 @@ def read_csv_robust(csv_path: str) -> pd.DataFrame:
         pd.errors.ParserError: If no delimiter produces a parseable table.
     """
     last_error: Optional[Exception] = None
-    raw_bytes: bytes | None = None
 
     # Read raw bytes once so we can try multiple encodings on the same content.
     with open(csv_path, "rb") as f:
@@ -113,6 +123,32 @@ def read_csv_robust(csv_path: str) -> pd.DataFrame:
     if last_error is not None:
         raise last_error  # type: ignore[misc]
     raise ValueError(f"Could not read CSV: {csv_path}")
+
+
+def read_csv_robust(csv_path: str) -> pd.DataFrame:
+    """Read a CSV with encoding fallback and delimiter detection.
+
+    Tries each encoding in turn. For the first encoding that decodes, it
+    sniffs the delimiter from the first 8KB and re-reads with that delimiter.
+    If every encoding fails, raises the last error.
+
+    The result is cached in memory via :func:`_read_csv_robust_impl`, so
+    repeated calls for the same ``csv_path`` within a process do not re-read
+    from disk. An isolated copy is returned so callers cannot mutate the
+    cached original.
+
+    Args:
+        csv_path: Path to the CSV file.
+
+    Returns:
+        A pandas DataFrame (isolated copy of the cached original).
+
+    Raises:
+        UnicodeDecodeError: If no encoding can decode the file.
+        pd.errors.ParserError: If no delimiter produces a parseable table.
+    """
+    df = _read_csv_robust_impl(csv_path)
+    return df.copy()
 
 
 __all__ = ["read_csv_robust"]
