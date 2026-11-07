@@ -109,11 +109,8 @@ def make_check_node(
 ) -> Callable[[GraphState], dict]:
     """Factory that wraps a registered check into a LangGraph node.
 
-    Args:
-        spec: Registry metadata for the check.
-        run_fn: Optional override for the function to call. The builder uses
-            this so tests can patch ``builder.CHECKS`` without losing the
-            registry metadata (required inputs, params, target gating).
+    ``run_fn`` lets tests patch ``builder.CHECKS`` without losing the
+    registry metadata (required inputs, params, target gating).
     """
     def _node(state: GraphState) -> dict:
         return _run_registered_check(spec, state, run_fn=run_fn)
@@ -134,12 +131,8 @@ def merge_findings_node(state: GraphState) -> GraphState:
 def router_node(state: GraphState) -> GraphState:
     """Decide whether to run deep leakage checks.
 
-    Examines merged findings. If any finding suggests a column could be
-    leaking the target (e.g., an ID-like column or a text column that is
-    mostly numeric), the graph routes to deep_checks. Otherwise it skips
-    straight to the report.
-
-    Sets ``leakage_suspected`` and ``suspect_columns`` in state.
+    Finds suspect columns in merged findings (id_like, or schema findings for
+    numeric-looking text) and sets ``leakage_suspected`` / ``suspect_columns``.
     """
     findings = state.get("findings") or []
     target_column = state.get("target_column")
@@ -164,16 +157,8 @@ def router_node(state: GraphState) -> GraphState:
 
 
 def deep_checks_node(state: GraphState) -> GraphState:
-    """Run the deep leakage check on all non-target columns.
-
-    Runs on every audit regardless of router suspicion, so that target
-    leakage detection (ROC AUC / R²) is always performed. The router's
-    ``suspect_columns`` are used when available to narrow the scan, but
-    when empty, all non-target columns are tested.
-
-    Results are stored in ``deep_check_results`` and any leakage findings are
-    returned to be merged into the findings list via the ``merge_findings``
-    reducer.
+    """Run the deep leakage check on non-target columns (leakage suspected
+    only); results go to ``deep_check_results`` and their findings are merged.
     """
     csv_path = state.get("csv_path")
     target_column = state.get("target_column")
@@ -181,10 +166,10 @@ def deep_checks_node(state: GraphState) -> GraphState:
     if not csv_path or not target_column:
         return {"deep_check_results": []}
 
-    # Determine which columns to test. When suspect_columns is empty,
-    # pass None so target_leakage tests all non-target columns.
-    suspect_columns = state.get("suspect_columns") or []
-    suspicious_columns = suspect_columns if suspect_columns else None
+    # When leakage is suspected, test all non-target columns for leakage.
+    # The router's suspect_columns are recorded in state for reporting, but
+    # target_leakage scans every column so the actual leaking column is found.
+    suspicious_columns = None
 
     spec = get_check("target_leakage")
     deep_state = dict(state)
@@ -210,12 +195,7 @@ def deep_checks_node(state: GraphState) -> GraphState:
 
 
 def _highest_severity(findings: list[dict]) -> Severity:
-    """Return the highest severity among findings (INFO when empty).
-
-    Uses :class:`Finding.__lt__`, which ranks severity by the
-    :class:`Severity` enum declaration order (CRITICAL > HIGH > MEDIUM >
-    LOW > INFO).
-    """
+    """Return the highest severity among findings (INFO when empty)."""
     if not findings:
         return Severity.INFO
     finding_objs = [Finding.model_validate(f) for f in findings]
@@ -309,8 +289,8 @@ def render_text_report(report: AuditReport) -> str:
         lines.append(f"Error: {report.error}")
         lines.append("")
 
-    # LLM plain-language summary (M4). Indent every line so multi-line
-    # detailed summaries stay visually nested under the heading.
+    # LLM plain-language summary (M4); indented so multi-line summaries
+    # stay visually nested under the heading.
     if report.summary:
         lines.append("Summary:")
         lines.append("-" * 32)
@@ -318,7 +298,6 @@ def render_text_report(report: AuditReport) -> str:
             lines.append(f"  {line}" if line.strip() else "")
         lines.append("")
 
-    # Findings section (M2 addition)
     if report.findings:
         sorted_findings = sorted(report.findings)
         lines.append("Findings:")
@@ -331,7 +310,6 @@ def render_text_report(report: AuditReport) -> str:
             )
         lines.append("")
 
-    # Deep check results section (M3 addition)
     if report.deep_check_results:
         lines.append("Deep Leakage Check Results:")
         lines.append("-" * 32)
@@ -395,18 +373,14 @@ def profile_node(state: GraphState) -> GraphState:
 def report_node(state: GraphState) -> GraphState:
     """Render the profile + merged findings + deep check results as a report.
 
-    Builds a single :class:`AuditReport` object — the source of truth — and
-    stores both its JSON serialization (``state["report"]``) and a plain-text
-    rendering (``state["report_text"]``).
-
-    If profiling failed (no profile), still renders a minimal report so
-    the error is surfaced to the user instead of being dropped.
+    Builds one :class:`AuditReport` — the source of truth — storing its JSON
+    (``state["report"]``) and plain-text rendering (``state["report_text"]``).
+    Even with no profile, renders a minimal report so the error surfaces.
     """
     profile = state.get("profile")
     dataset_id = state.get("dataset_id", "unknown")
     error = state.get("error")
     findings_raw = state.get("findings") or []
-    # Reconstitute Finding objects from dicts for the AuditReport.
     findings = [Finding.model_validate(f) for f in findings_raw]
     deep_check_results = state.get("deep_check_results") or []
     summary = state.get("summary")

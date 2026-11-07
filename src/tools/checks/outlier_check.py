@@ -29,22 +29,14 @@ from src.tools.target_type import detect_target_type
 def outlier_check(df: pd.DataFrame, target_column: Optional[str] = None) -> list[Finding]:
     """Detect numeric columns with excessive outliers using the IQR method.
 
-    For each numeric column, computes Q1, Q3, and IQR. Any value outside
-    [Q1 - 1.5*IQR, Q3 + 1.5*IQR] is considered an outlier.
-
-    Flags columns where outliers exceed configured thresholds:
-    - outlier_pct > outlier_pct_threshold     -> MEDIUM
-    - outlier_pct > high_outlier_pct_threshold -> HIGH
-
-    Columns are pre-filtered by the registry's semantic gating
-    (accepted_semantic = {numeric_measurement, numeric_discrete}), so
-    integer-coded categoricals, identifiers, and constants never reach here.
+    Values outside [Q1 - 1.5*IQR, Q3 + 1.5*IQR] are outliers; columns with
+    more than the configured share get MEDIUM/HIGH. The registry's semantic
+    gating (numeric_measurement/numeric_discrete) pre-filters columns here.
     """
     findings: list[Finding] = []
 
-    # Skip outlier check for classification targets — redundant with
-    # class_imbalance check. Outlier detection is only meaningful for
-    # regression targets.
+    # Skip for classification targets — redundant with the class_imbalance
+    # check; outliers only matter for regression targets.
     if target_column and target_column in df.columns:
         target = df[target_column].dropna()
         if len(target) > 0:
@@ -55,17 +47,15 @@ def outlier_check(df: pd.DataFrame, target_column: Optional[str] = None) -> list
     for col in df.columns:
         series = df[col]
 
-        # Basic type guard for direct callers (checks are normally gated by
-        # the registry's semantic gating, which restricts this check to
-        # numeric_measurement / numeric_discrete columns).
+        # Type guard for direct callers; the registry gates this check to
+        # numeric semantics normally.
         if not pd.api.types.is_numeric_dtype(series):
             continue
 
-        # Drop NaN before computing IQR.
         clean = series.dropna()
 
         if len(clean) < 4:
-            # Not enough data for a meaningful IQR calculation.
+            # Too few rows for a meaningful IQR.
             continue
 
         q1 = float(clean.quantile(0.25))
@@ -83,7 +73,7 @@ def outlier_check(df: pd.DataFrame, target_column: Optional[str] = None) -> list
         elif outlier_pct > check_config.outliers.outlier_pct_threshold:
             severity = Severity.MEDIUM
         else:
-            continue  # No outlier issue flagged
+            continue
 
         findings.append(
             Finding(

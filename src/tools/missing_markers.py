@@ -1,16 +1,9 @@
 """One shared definition of "missing" for profiling and checks.
 
-Real CSVs often encode missing values as text markers (``?``, ``NA``, ``-``,
-blank strings) instead of true NaN. If profiling counted only NaN while the
-missing check counted markers too, the report would claim ``missing=0`` for a
-column that is actually full of ``?``. That is misleading, so both places use
-this module.
-
-Missing markers are configurable via the ``DATA_DETECTIVE_MISSING_MARKERS``
-environment variable (comma-separated list) or by passing ``extra_markers``
-to :func:`count_missing`.
-
-Design rule: pandas does the counting; the LLM only reads the result.
+Real CSVs often encode missing values as text markers (``?``, ``NA``,
+blanks). Profiling and checks must count them the same way, so both use this
+module. Markers are configurable via the ``DATA_DETECTIVE_MISSING_MARKERS``
+env var (comma-separated) or ``extra_markers`` — the defaults are never lost.
 """
 
 from __future__ import annotations
@@ -48,14 +41,8 @@ def count_missing(
 ) -> tuple[int, int]:
     """Return ``(nan_count, marker_count)`` for one column.
 
-    ``nan_count`` counts true NaN/NaT values. ``marker_count`` counts string
-    cells (after stripping spaces) that match a known missing marker.
-    Markers are only counted for string columns; numbers are never matched.
-
-    Args:
-        series: The column to scan.
-        extra_markers: Additional markers to treat as missing for this call,
-            merged with the module-level set.
+    ``marker_count`` matches string cells (after stripping spaces) against
+    the marker set; string columns only — numbers are never matched.
     """
     nan_count = int(series.isna().sum())
 

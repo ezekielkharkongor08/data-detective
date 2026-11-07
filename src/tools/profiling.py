@@ -1,12 +1,9 @@
 """Dataset profiling.
 
-A plain pandas function with no LLM and no LangGraph. It loads a CSV from disk
-and returns a compact summary: column names, dtypes, missing counts, dupliactes, basic numeric stats, and a few sample rows.
-
-The profile also carries a compact per-column ``semantic`` classification
-(``src/tools/profiling.py:classify_columns``) so that checks such as skewness
-and outliers never run on integer-coded categoricals, identifiers, or
-constants.
+A plain pandas function — no LLM, no LangGraph. Loads a CSV and returns a
+compact summary: column names, dtypes, missing counts, duplicates, basic
+stats, and a few sample rows, plus a per-column ``semantic`` classification
+so checks never run on identifiers, constants, or integer-coded categoricals.
 """
 
 from __future__ import annotations
@@ -539,19 +536,8 @@ def profile_dataset(
 ) -> dict[str, Any]:
     """Build a compact profile of a CSV dataset.
 
-    Args:
-        csv_path: Path to the CSV file.
-        target_column: Optional target column. When it exists, the profile
-            reports its ``target_type`` so checks can decide whether they
-            apply (for example, fairness only supports classification
-            targets).
-        overrides: Optional ``{column_name: semantic_type}`` map from the
-            ``--semantic-override`` CLI flag. Overrides win over every rule
-            (rule 0). Unknown column names or invalid type names produce a
-            warning and are skipped.
-
-    Returns:
-        A JSON-friendly profile dict.
+    Reports the target's ``target_type`` when given, and applies semantic
+    ``overrides`` (rule 0: overrides win over every classifier rule).
     """
     df = read_csv_robust(csv_path)
 

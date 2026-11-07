@@ -1,29 +1,12 @@
 """Target leakage detection check (M3).
 
-Trains a quick baseline model using only one suspicious column to predict the
-target. If a single column alone can predict the target too well, that column
-likely leaks the answer.
-
-Classification uses cross-validated ROC AUC instead of raw accuracy because
-accuracy is misleading on imbalanced targets: a majority-class-only predictor
-scores ~76% on Adult and ~73% on Telco with zero real signal. ROC AUC is
-invariant to class balance -- a useless predictor scores 0.5 regardless.
-
-Regression uses cross-validated R^2. A column that alone explains almost all
-variance of the target (R^2 near 1.0) is suspicious.
-
-Supports binary, multiclass (one-vs-rest macro AUC), and continuous targets.
-
-Design:
-- Cross-validation (k=5) preserves class balance in each fold (StratifiedKFold
-  for classification; plain KFold for regression).
-- Imputers and encoders live inside a scikit-learn Pipeline and are fitted
-  per fold, so no information from a validation fold leaks into the training
-  data.
-- High-cardinality columns (>= 90% unique values) are skipped; the ID-like
-  check covers them.
-
-Returns a list of Finding objects (empty means no leakage detected).
+Trains a quick baseline model on one suspicious column: if that column alone
+predicts the target too well (cross-validated ROC AUC / one-vs-rest macro
+AUC for classification, R^2 for regression), it likely leaks the answer.
+ROC AUC is used instead of accuracy because it is invariant to class
+imbalance. Preprocessing lives inside a per-fold Pipeline so validation
+folds never leak into training; high-cardinality columns are skipped
+(the id_like check covers them).
 """
 
 from __future__ import annotations
@@ -148,18 +131,9 @@ def leakage_check(
 ) -> list[Finding]:
     """Detect target leakage: a feature that alone predicts the target too well.
 
-    Args:
-        df: The pre-loaded DataFrame.
-        target_column: Name of the target column (required).
-        suspicious_columns: Columns to test for leakage. If None, all
-            non-target columns are considered. When provided (for example
-            from the router's suspect columns), the CV loop runs only on
-            these columns, avoiding an expensive scan of every column.
-
-    Returns:
-        A list of Finding objects. Empty list means no leakage detected.
-        For classification, findings are based on cross-validated ROC AUC.
-        For regression, findings are based on cross-validated R^2.
+    Tests ``suspicious_columns`` or all non-target columns with
+    cross-validated ROC AUC (classification) or R^2 (regression).
+    Empty list means no leakage detected.
     """
     if not target_column:
         return [
@@ -218,9 +192,8 @@ def leakage_check(
     findings: list[Finding] = []
 
     if is_continuous:
-        # --- Regression path: cross-validated R^2 ---
         if not pd.api.types.is_numeric_dtype(y):
-            # Should not happen (_is_continuous_target checks this), but guard.
+            # Cannot happen (_is_continuous_target checks dtype), but guard.
             return []
         y_values = y.values.astype(float)
         cv = KFold(
@@ -266,7 +239,7 @@ def leakage_check(
             elif r2_mean >= check_config.leakage.medium_r2:
                 severity = Severity.MEDIUM
             else:
-                continue  # No leakage flag
+                continue
 
             # Sampling note appended to evidence so users know results are
             # approximate when the dataset was downsampled for CV.
@@ -365,7 +338,7 @@ def leakage_check(
         elif auc_mean >= check_config.leakage.medium_auc:
             severity = Severity.MEDIUM
         else:
-            continue  # No leakage flag
+            continue
 
         # Sampling note appended to evidence so users know results are
         # approximate when the dataset was downsampled for CV.

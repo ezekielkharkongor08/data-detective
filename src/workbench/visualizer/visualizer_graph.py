@@ -1,17 +1,8 @@
 """LangGraph builder for the Visualizer Workbench (V2).
- 
-Builds a small ReAct graph with a conditional gate after ``route``:
- 
-    entry -> route -> [visualize | exit]
-                 |
-                 v (if want_plots)
-             agent -> tools -> agent -> ... -> collect -> END
- 
-The conditional edge after ``route`` is the gate: if the user wants
-plots, the graph proceeds to the LLM-driven agent that invokes plotting
-tools; otherwise it exits immediately.
- 
-V1 is not modified. V1's builder.py is left entirely as-is.
+
+Builds a small ReAct graph: entry -> route -> [visualize | exit], where the
+gate after ``route`` decides whether the agent runs plot tools at all.
+V1 is not modified.
 """
  
 from typing import Any, Optional

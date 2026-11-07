@@ -1,12 +1,10 @@
 """Multi-dataset evaluation harness for Data Detective.
 
-Audits each dataset registered in ``eval/datasets.yaml`` and checks
-invariants: no crash, no duplicate findings, valid finding fields/severities,
-deterministic repeat runs, and bias skipped when no sensitive columns are
-given.
+Audits each dataset in ``eval/datasets.yaml`` and checks invariants: no
+crash, no duplicate findings, valid finding fields/severities, deterministic
+repeat runs, and bias skipped when no sensitive columns are given.
 
-Usage (as a module):
-    python -m eval.run_harness
+Usage: python -m eval.run_harness
 """
 
 from __future__ import annotations
@@ -23,10 +21,10 @@ from src.graph.builder import build_graph
 
 
 def _finding_key(finding: dict[str, Any]) -> tuple:
-    """Return a hashable key for a finding, treating affected_columns as a set.
+    """Return a hashable key for a finding.
 
-    Two findings are considered the same if they share check_name, the same
-    affected columns (order-insensitive), and the same evidence.
+    Two findings are the same when they share check_name, affected columns
+    (order-insensitive), and evidence.
     """
     cols = tuple(sorted(finding.get("affected_columns", [])))
     return (
@@ -46,9 +44,9 @@ def _find_duplicates(findings: list[dict[str, Any]]) -> dict[tuple, int]:
 
 
 def _check_findings_valid(findings: list[dict[str, Any]]) -> list[str]:
-    """Return a list of error strings for any invalid findings.
+    """Return error strings for invalid findings.
 
-    A valid finding has: non-empty check_name, a known severity, non-empty
+    A valid finding has non-empty check_name, a known severity, non-empty
     evidence, affected_columns as a list of strings, and confidence in [0,1].
     """
     valid_severities = {"info", "low", "medium", "high", "critical"}
@@ -74,16 +72,9 @@ def _check_findings_valid(findings: list[dict[str, Any]]) -> list[str]:
 def _audit_dataset(spec: dict[str, Any]) -> dict[str, Any]:
     """Audit one dataset and return invariant-check results.
 
-    Args:
-        spec: Dict with keys ``name``, ``path``, ``target``, ``sensitive``,
-            ``favorable``.
-
-    Returns:
-        Dict with keys:
-          - ``passed``: bool — all invariants held
-          - ``errors``: list[str] — invariant violations
-          - ``findings_count``: int — total findings
-          - ``check_names``: list[str] — distinct check names that ran
+    ``spec`` holds ``name``, ``path``, ``target``, ``sensitive``, and
+    ``favorable``. The result has ``passed``, ``errors``, ``findings_count``,
+    and ``check_names``.
     """
     errors: list[str] = []
     name = spec.get("name", "unknown")
@@ -100,14 +91,14 @@ def _audit_dataset(spec: dict[str, Any]) -> dict[str, Any]:
             "check_names": [],
         }
 
-    # Build check_params for bias if sensitive columns are given.
+    # Bias check only runs when sensitive columns are given.
     check_params: dict[str, dict] = {}
     if sensitive:
         check_params["bias"] = {"sensitive_columns": sensitive}
         if favorable is not None:
             check_params["bias"]["favorable_value"] = favorable
 
-    # Run the graph twice to verify determinism.
+    # Two identical runs verify determinism.
     results: list[dict[str, Any]] = []
     for run in range(2):
         graph = build_graph(checkpointer=MemorySaver())
@@ -131,7 +122,6 @@ def _audit_dataset(spec: dict[str, Any]) -> dict[str, Any]:
             }
         results.append(state)
 
-    # Determinism: both runs must produce the same findings.
     findings_a = results[0].get("findings") or []
     findings_b = results[1].get("findings") or []
     keys_a = sorted(_finding_key(f) for f in findings_a)
@@ -141,12 +131,10 @@ def _audit_dataset(spec: dict[str, Any]) -> dict[str, Any]:
 
     findings = findings_a
 
-    # Validity of each finding.
     validity_errors = _check_findings_valid(findings)
     for err in validity_errors:
         errors.append(f"{name}: {err}")
 
-    # No duplicate findings.
     dupes = _find_duplicates(findings)
     for key, count in dupes.items():
         errors.append(f"{name}: duplicate finding {key} (x{count})")

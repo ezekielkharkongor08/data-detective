@@ -27,20 +27,16 @@ from src.tools.target_type import detect_target_type
     accepted_semantic=frozenset({"numeric_measurement", "numeric_discrete"}),
 )
 def skewness_check(df: pd.DataFrame, target_column: Optional[str] = None) -> list[Finding]:
-    """Detect numeric columns with high skew magnitude.
+    """Detect numeric columns with high absolute skew.
 
-    Flags columns where the absolute skewness exceeds configured thresholds:
-    - |skew| > skew_threshold    -> MEDIUM
-    - |skew| > high_skew_threshold -> HIGH
-
-    Columns are pre-filtered by the registry's semantic gating
-    (accepted_semantic = {numeric_measurement, numeric_discrete}), so
-    integer-coded categoricals, identifiers, and constants never reach here.
+    Columns over the configured skew thresholds get MEDIUM/HIGH; the
+    registry's semantic gating (numeric_measurement/numeric_discrete)
+    pre-filters columns here.
     """
     findings: list[Finding] = []
 
-    # Skip skewness check for classification targets — redundant with
-    # class_imbalance check. Skewness is only meaningful for regression targets.
+    # Skip for classification targets — redundant with the class_imbalance
+    # check; skewness only matters for regression targets.
     if target_column and target_column in df.columns:
         target = df[target_column].dropna()
         if len(target) > 0:
@@ -51,17 +47,15 @@ def skewness_check(df: pd.DataFrame, target_column: Optional[str] = None) -> lis
     for col in df.columns:
         series = df[col]
 
-        # Basic type guard for direct callers (checks are normally gated by
-        # the registry's semantic gating, which restricts this check to
-        # numeric_measurement / numeric_discrete columns).
+        # Type guard for direct callers; the registry gates this check to
+        # numeric semantics normally.
         if not pd.api.types.is_numeric_dtype(series):
             continue
 
-        # Drop NaN before computing skew.
         clean = series.dropna()
 
         if len(clean) < 3:
-            # Not enough data for a meaningful skew calculation.
+            # Too few rows for a meaningful skew value.
             continue
 
         skew = float(clean.skew())
@@ -72,7 +66,7 @@ def skewness_check(df: pd.DataFrame, target_column: Optional[str] = None) -> lis
         elif abs_skew > check_config.skewness.skew_threshold:
             severity = Severity.MEDIUM
         else:
-            continue  # No skewness issue flagged
+            continue
 
         direction = "positive" if skew > 0 else "negative"
 

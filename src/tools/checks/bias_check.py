@@ -1,39 +1,10 @@
 """Fairness check: compare favorable outcome rates across sensitive groups.
 
-Design rules
-------------
-- **User-specified columns only.** The check never picks a sensitive column
-  on its own. A short column-name hint list is used only inside the skip note
-  to suggest candidates; hinted columns are not analysed.
-- **Binary targets only.** Fairness rates need a clear favorable outcome.
-  Multiclass and continuous targets are skipped with one informational note.
-- **No model training.** The check compares observed outcome rates. It does
-  not train a classifier or use cross-validation.
-- **Every skip is explicit.** Missing inputs, ambiguous favorable values,
-  groups below ``check_config.bias.min_group_size``, and non-significant differences all return
-  an informational note instead of silently doing nothing.
-
-Statistics
-----------
-For each sensitive column, eligible groups (at least ``check_config.bias.min_group_size``
-non-missing rows) are compared:
-
-- **Favorable rate**: share of the group whose target equals the favorable
-  value.
-- **Rate difference**: reference group rate minus the worst-off group rate,
-  in percentage points.
-- **Disparate impact (DI)**: worst-off rate divided by the reference rate.
-  The reference is the group with the highest favorable rate.
-- **Chi-square p-value**: computed with ``scipy.stats.chi2_contingency`` on
-  the group-by-outcome contingency table. A finding needs ``p < check_config.bias.p_value_limit``
-  so a small-sample fluke is not reported as a real disparity.
-
-Severity is based on the disparate impact ratio:
-
-- ``DI < 0.4`` -> CRITICAL
-- ``DI < 0.6`` -> HIGH
-- ``DI < 0.8`` -> MEDIUM
-- ``DI >= 0.8`` -> no finding
+The check never picks a sensitive column itself and never trains a model;
+it compares observed outcome rates and a chi-square p-value guards against
+small-sample flukes. Every skip returns an explicit informational note.
+Severity comes from the disparate-impact ratio: DI < 0.4 CRITICAL,
+DI < 0.6 HIGH, DI < 0.8 MEDIUM, otherwise no finding.
 """
 
 from __future__ import annotations
@@ -365,17 +336,8 @@ def bias_check(
 ) -> list[Finding]:
     """Compare favorable outcome rates across user-specified sensitive groups.
 
-    Args:
-        df: The pre-loaded DataFrame.
-        target_column: Binary or boolean target column.
-        sensitive_columns: Sensitive columns to compare. Required; the check
-            never selects columns on its own.
-        favorable_value: Value of the target that counts as a favorable
-            outcome. Optional for boolean targets and 0/1 numeric targets,
-            where it is inferred.
-
-    Returns:
-        Fairness findings, or informational notes for every skip.
+    Binary/boolean targets only; ``favorable_value`` is inferred for boolean
+    and 0/1 targets. Every skip produces an informational note.
     """
     if not target_column:
         return _skip(

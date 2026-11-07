@@ -1,24 +1,9 @@
 """LLM context builder: a compact, token-budgeted digest of the profile.
 
-The full profile stays in state, the database, and the report. The LLM only
-receives this digest, which:
-
-- groups columns by semantic type as capped name lists (no stats, no
-  sample rows for the agent),
-- lists the top missing columns,
-- flags ambiguous columns with a reason.
-
-When the digest exceeds ``budget_tokens`` it degrades in a fixed order so
-small local models always receive something bounded:
-
-1. drop ambiguous-column reasons
-2. shrink per-type name lists (25 -> 10 -> 5 names)
-3. drop text columns from the name lists
-4. drop ambiguous columns entirely
-5. drop per-type name lists entirely (keep type counts only)
-
-Token estimation is deliberately conservative (1 token ~= 4 characters)
-so the real prompt is almost always smaller than the budget.
+The LLM only ever receives this digest (never the full profile). If it
+exceeds ``budget_tokens`` it degrades in a fixed order (drop ambiguity
+reasons, shrink and then drop name lists) so small local models always get a
+bounded prompt. Token estimation is conservative (1 token ~= 4 chars).
 """
 
 from __future__ import annotations
@@ -46,18 +31,8 @@ def _dump(obj: Any) -> str:
 def build_llm_digest(profile: dict[str, Any], budget_tokens: int = DEFAULT_BUDGET_TOKENS) -> dict[str, Any]:
     """Build a token-budgeted digest of ``profile`` for the LLM.
 
-    The returned dict is JSON-friendly and contains no per-column stats or
-    sample rows. The full ``profile`` is left untouched in state, the DB,
-    and the report.
-
-    Args:
-        profile: The full profiling dict (unchanged).
-        budget_tokens: Max estimated tokens for the digest.
-
-    Returns:
-        A dict with keys ``n_rows``, ``n_cols``, ``target_type``,
-        ``columns_by_type``, ``type_counts``, ``top_missing``,
-        ``ambiguous``, and ``truncated``.
+    JSON-friendly dict with grouped column names, top missing columns, and
+    ambiguous columns. The ``profile`` itself is never modified.
     """
     columns = profile.get("columns", []) or []
     semantic_lookup = {

@@ -65,34 +65,20 @@ def _sev_name(finding: dict) -> str:
 
 
 def _sort_findings(findings: list) -> list:
-    """Sort findings by severity (highest first), then by check name.
-
-    Uses :class:`Finding.__lt__` for severity ranking (backed by the
-    :class:`Severity` enum declaration order). A stable two-pass sort
-    preserves check_name ordering for ties.
-    """
-    # First sort by check name (secondary key).
+    """Sort findings by severity (highest first), then check name."""
+    # Two-pass stable sort: name first, then severity, so ties keep name order.
     by_name = sorted(findings, key=lambda f: str(f.get("check_name", "")))
-    # Then sort by severity using Finding.__lt__ (primary key).
-    # Stable sort preserves check_name order for equal severities.
     finding_objs = [Finding.model_validate(f) for f in by_name]
-    finding_objs.sort()  # Highest severity first via Finding.__lt__
+    finding_objs.sort()  # highest severity first via Finding.__lt__
     return [f.model_dump(mode="json") for f in finding_objs]
 
 
 def _group_findings(findings: list[dict]) -> list[dict]:
-    """Aggregate findings by check_name + severity so the LLM receives one
+    """Aggregate findings by (check_name, severity) so the LLM gets one
     bullet per check type per severity level.
 
-    Grouping key is a tuple (check_name, severity) so that a LOW-severity
-    missing_values finding never gets merged under a CRITICAL severity
-    finding for the same check type.
-
-    For findings with the same (check_name, severity):
-    - Keep the severity from the group key.
-    - Combine all affected_columns into a single deduplicated list.
-    - Combine evidence strings so the LLM still gets all numerical facts.
-    - Keep the highest confidence.
+    Columns are merged into one deduplicated list, evidence strings are
+    joined for all facts, and the highest confidence is kept.
     """
     groups: dict[tuple[str, str], list[dict]] = {}
     for f in findings:
@@ -107,7 +93,7 @@ def _group_findings(findings: list[dict]) -> list[dict]:
 
         check_name, severity = key
 
-        # Combine affected_columns (deduplicated, order-preserving).
+        # Column merge: deduplicated, order-preserving.
         all_cols: list[str] = []
         seen_cols: set[str] = set()
         for i in items:
@@ -116,7 +102,7 @@ def _group_findings(findings: list[dict]) -> list[dict]:
                     seen_cols.add(col)
                     all_cols.append(col)
 
-        # Combine evidence strings so the LLM gets all numerical facts.
+        # Combine evidence strings so the LLM keeps all numerical facts.
         evidence_parts = [
             str(i.get("evidence", "")).strip()
             for i in items
@@ -124,7 +110,6 @@ def _group_findings(findings: list[dict]) -> list[dict]:
         ]
         combined_evidence = " ".join(evidence_parts)
 
-        # Highest confidence.
         best_confidence = max(float(i.get("confidence", 1.0)) for i in items)
 
         grouped.append(

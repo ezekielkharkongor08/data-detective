@@ -12,11 +12,9 @@ from src.graph.reducers import merge_findings
 class GraphState(TypedDict, total=False):
     """State carried through the audit graph.
 
-    All fields are optional so a node can return only the fields it updates.
-
-    ``findings`` is stored as a list of plain dicts (via ``Finding.model_dump``)
-    so the LangGraph checkpointer can serialize them to JSON without needing a
-    custom serializer for Pydantic models.
+    All fields are optional so a node returns only what it updates.
+    ``findings`` is a list of plain dicts (from ``Finding.model_dump``) so the
+    checkpointer can serialize them without a custom Pydantic serializer.
     """
 
     dataset_id: str
@@ -24,20 +22,16 @@ class GraphState(TypedDict, total=False):
     target_column: Optional[str]
     profile: Optional[dict]
 
-    # Per-check parameters, keyed by check name. Example:
-    #   check_params["bias"] = {"sensitive_columns": ["sex"], "favorable_value": ">50K"}
-    # Checks declare which keys they read; the registry only passes the ones
-    # declared, so adding a check needs no state-field changes.
+    # Per-check parameters keyed by check name, for example
+    # check_params["bias"] = {"sensitive_columns": ["sex"]}.
+    # Checks declare the keys they read, so adding a check needs no state changes.
     check_params: dict[str, dict]
 
-    # Semantic type overrides from --semantic-override CLI flag:
-    #   {column_name: semantic_type}. Applied by classify_columns in profile_node.
-    #   Rule 0: overrides win over every classifier rule.
+    # {column_name: semantic_type} from --semantic-override; applied in
+    # profile_node. Rule 0: overrides win over every classifier rule.
     semantic_overrides: dict[str, str]
 
-    # Merged findings from all parallel checks. ``merge_findings`` is the
-    # reducer: it concatenates lists returned by parallel branches and drops
-    # duplicates, so a repeated finding can never appear twice in the report.
+    # Reducer concatenates findings from parallel branches and drops dupes.
     findings: Annotated[list[dict], merge_findings]
 
     # Set by the router when a finding suggests potential leakage.
@@ -53,9 +47,9 @@ class GraphState(TypedDict, total=False):
 
     # JSON report (single source of truth, serialized AuditReport).
     report: Optional[str]
-    # Plain-text report rendered from the JSON report object.
+    # Plain-text rendering of the JSON report.
     report_text: Optional[str]
-    # Error message if a node failed.
+    # Set by a node when it fails.
     error: Optional[str]
 
 

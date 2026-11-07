@@ -82,7 +82,11 @@ def build_graph(checkpointer=None):
         )
  
     builder.add_edge("merge_findings", "router")
-    builder.add_edge("router", "deep_checks")
+    builder.add_conditional_edges(
+        "router",
+        lambda state: "deep_checks" if state.get("leakage_suspected") else "report",
+        {"deep_checks": "deep_checks", "report": "report"},
+    )
     builder.add_edge("deep_checks", "report")
     builder.add_edge("report", END)
  

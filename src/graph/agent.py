@@ -1,12 +1,8 @@
 """ReAct check agent.
 
-A small ReAct loop built with LangGraph:
-
-    agent (LLM decides) -> tools (runs a check) -> agent ... -> END
-
-The LLM sees only the compact profile (never the CSV) and chooses which
-checks to call. Each tool returns Finding objects as JSON; we collect them
-back into ``Finding`` objects when the loop ends.
+A small ReAct loop: agent (LLM decides) -> tools (runs a check) -> END.
+The LLM sees only the compact profile and chooses which checks to call;
+tool results are collected back into ``Finding`` objects when it ends.
 """
 
 from __future__ import annotations
@@ -139,9 +135,8 @@ def run_checks_with_agent(
 ) -> tuple[list[Finding], list]:
     """Run the ReAct agent on a dataset profile and return its findings.
 
-    Returns:
-        (findings, messages) where findings are deduplicated ``Finding``
-        objects produced by the tools the agent chose to call.
+    Deduplicated ``Finding`` objects produced by the tools the agent chose;
+    also returns the full agent message history.
     """
     agent = build_check_agent(llm, tools=tools)
 

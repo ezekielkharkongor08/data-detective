@@ -1,20 +1,10 @@
 """Matplotlib plotting tools for the Visualizer Workbench (V2).
 
-Each tool is built with LangChain's ``StructuredTool.from_function``,
-mirroring V1's ``src/graph/tools.py`` pattern exactly.
-
-V1 reuse (read-only):
-- ``read_csv_robust`` is imported from ``src.tools.csv_reader`` and called
-  directly. It is NOT duplicated, rewritten, or wrapped inside V2.
-
-Charts are saved strictly as .png files to the root-level ``plots/``
-directory using default matplotlib colors. No database image storage.
-
-Implementation notes:
-- Figures are built with the object-oriented ``Figure`` API, not ``pyplot``.
-  ``pyplot`` keeps global state and is not thread-safe, and ``ToolNode`` can
-  run several tool calls at the same time.
-- The CSV is read once and reused by the tool calls of the same audit.
+Built with LangChain ``StructuredTool.from_function``, mirroring V1's
+``src/graph/tools.py``; ``read_csv_robust`` is reused read-only. Charts go
+to ``plots/<dataset>/*.png`` with default matplotlib colors. Figures use the
+``Figure`` API instead of ``pyplot`` because ``ToolNode`` can run tools in
+parallel and ``pyplot`` is not thread-safe.
 """
 
 from __future__ import annotations
@@ -107,7 +97,7 @@ def _save_fig(fig: Figure, filename: str, subfolder: str | None = None) -> str:
 
 @lru_cache(maxsize=2)
 def _read_cached(csv_path: str, mtime_ns: int, size: int) -> pd.DataFrame:
-    # mtime_ns and size are part of the cache key, so an edited file is re-read.
+    # mtime_ns and size are cache keys, so an edited file is re-read.
     return read_csv_robust(csv_path)
 
 

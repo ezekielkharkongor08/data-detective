@@ -1,13 +1,8 @@
 """Shared check thresholds and algorithmic constants.
 
-Centralizing thresholds in one place means changing a detection criterion
-requires editing one file, not every check module. Each check imports the
-values it needs from here instead of defining its own module-level
-constants.
-
-The registry's ``severity_key`` field names the config section that belongs
-to each check (for example ``class_imbalance`` maps to the imbalance
-thresholds below).
+Centralizing thresholds here means changing a detection criterion requires
+editing one file. The registry's ``severity_key`` field maps each check to
+its config section (for example ``class_imbalance`` -> imbalance thresholds).
 """
 
 from __future__ import annotations
@@ -40,15 +35,15 @@ class LeakageConfig:
     critical_r2: float = 0.98
     high_r2: float = 0.90
     medium_r2: float = 0.70
-    max_rows_for_cv: int = 100000   # sample above this before CV (1 lakh rows)
-    cv_random_state: int = 42      # fixed seed for deterministic CV
+    max_rows_for_cv: int = 100000   # sample above this before CV
+    cv_random_state: int = 42       # fixed seed so CV results are deterministic
 
 
 @dataclass(frozen=True)
 class ImbalanceConfig:
     """Class imbalance check thresholds."""
 
-    high_threshold: float = 0.10   # minority share < 10%  -> HIGH
+    high_threshold: float = 0.10    # minority share < 10% -> HIGH
     medium_threshold: float = 0.30  # minority share < 30% -> MEDIUM
 
 
@@ -63,9 +58,8 @@ class SchemaConfig:
 class MissingConfig:
     """Missing value check thresholds."""
 
-    critical_pct: float = 50.0   # > 50% missing -> CRITICAL
-    high_pct: float = 20.0       # > 20% missing -> HIGH
-    # > 0% missing -> LOW (no constant needed)
+    critical_pct: float = 50.0  # > 50% missing -> CRITICAL
+    high_pct: float = 20.0      # > 20% missing -> HIGH
 
 
 @dataclass(frozen=True)
@@ -86,7 +80,7 @@ class TargetTypeConfig:
 class SkewnessConfig:
     """Skewness check thresholds."""
 
-    skew_threshold: float = 1.0    # |skew| > 1.0 -> MEDIUM
+    skew_threshold: float = 1.0        # |skew| > 1.0 -> MEDIUM
     high_skew_threshold: float = 2.0   # |skew| > 2.0 -> HIGH
 
 
@@ -102,50 +96,41 @@ class OutlierConfig:
 class SemanticConfig:
     """Thresholds for column semantic classification.
 
-    Every ratio uses n_eff (the count of non-missing values in a column),
-    never the raw row count. A column with many missing values is therefore
-    not misclassified just because the dataset is large.
-
-    Why each threshold is a ratio:
-      - Ratios are scale-free: the same rule behaves identically on a
-        100-row and a 100,000-row file.
-      - Absolute counts tuned to one dataset would misfire on any other
-        size, which is exactly what this design avoids.
+    Every ratio uses n_eff (non-missing value count), never the raw row
+    count, so a column with many missing values is not misclassified.
+    Ratios are scale-free, so the same rule works on files of any size.
     """
 
-    # Minimum non-missing values needed before uniqueness-based rules run.
-    # Below this, classification relies on dtype and exact-two-values only
-    # and is marked ambiguous.
+    # Uniqueness rules need this many non-missing values; below it, the
+    # column is classified only by dtype / exact-two-values and marked ambiguous.
     MIN_ROWS: int = 50
 
-    # Fixed deterministic sample used for expensive parse/pairwise tests.
+    # Deterministic sample for expensive parse/pairwise tests.
     SAMPLE_SIZE: int = 2000
 
-    # String -> datetime parse ratio required to call a text column a date.
+    # Parse ratio to call a text column a date.
     DATE_PARSE_RATIO: float = 0.8
 
-    # String -> number parse ratio required to take the numeric path.
+    # Parse ratio to take the numeric path.
     NUMERIC_PARSE_RATIO: float = 0.9
 
-    # Uniqueness share (nunique / n_eff) above which a column is
-    # identifier-like.
+    # Uniqueness share (nunique / n_eff) above which a column is identifier-like.
     IDENTIFIER_UNIQUE_RATIO: float = 0.99
 
-    # One-to-one mapping ratio required to treat an int column as an encoded
+    # One-to-one mapping ratio for treating an int column as an encoded
     # duplicate of a text column.
     ENCODED_DUP_RATIO: float = 0.95
 
-    # Max candidate columns per side for the encoded-duplicate pairwise scan.
+    # Max candidate columns per side in the encoded-duplicate pairwise scan.
     PAIRWISE_CAP: int = 30
 
     # Cardinality ratio at or below which a string column is categorical.
     CARDINALITY_RATIO: float = 0.05
 
-    # Integer columns with at most this many distinct values may be discrete.
+    # Int columns with at most this many distinct values may be discrete.
     DISCRETE_MAX_UNIQUE: int = 20
 
-    # Small absolute distinct-value cap for treating low-cardinality text as
-    # categorical.
+    # Absolute distinct-value cap for treating low-cardinality text as categorical.
     DISCRETE_ABS_CAP: int = 20
 
     # Parse ratio below which confidence is reduced.
@@ -168,7 +153,7 @@ class CheckConfig:
     semantic: SemanticConfig = SemanticConfig()
 
 
-# Module-level instance used by all checks.
+# Single shared instance used by all checks.
 check_config = CheckConfig()
 
 

@@ -1,24 +1,16 @@
 """Data Detective CLI.
 
-Run a pipeline audit or the LLM agent audit.
+Run a pipeline audit or the LLM agent audit; every run is saved to PostgreSQL.
 
 Examples:
     python main.py data/raw/adult.csv --target income
     python main.py data/raw/adult.csv --target income --agent
     python main.py --list
     python main.py data/raw/adult.csv --target income --thread-id run-001
-    python main.py data/raw/adult.csv --target income --sensitive <column_name> --favorable <val>  # Runs fairness and bias checks for specific groups
-
-The agent mode reads LLM settings from `.env`.
-Plain-text output is printed to stdout; the full JSON report is persisted to
-PostgreSQL.
-
-Persistence:
-    --list            List past audit runs from PostgreSQL and exit.
-    --thread-id ID    Use this thread_id for the run (auto-generated if omitted).
+    python main.py data/raw/adult.csv --target income --sensitive <column_name> --favorable <val>
 
 The graph runs to completion in a single invoke; there is no human-in-the-loop
-pause. PostgresSaver silently saves run history to the database.
+pause. LLM settings come from `.env`.
 """
 
 from __future__ import annotations
@@ -168,7 +160,7 @@ def _persisted_graph(use_agent: bool):
     """
     settings = get_settings()
     with PostgresSaver.from_conn_string(settings.postgres_conn_string) as saver:
-        saver.setup()  # idempotent: creates checkpoints/checkpoint_writes tables
+        saver.setup()  # safe to call repeatedly: only creates missing tables
         graph = (
             build_agent_graph(checkpointer=saver)
             if use_agent
@@ -178,16 +170,14 @@ def _persisted_graph(use_agent: bool):
 
 
 def main() -> None:
-    # Print the report's unicode characters correctly on Windows consoles.
+    # Windows consoles default to a non-UTF8 codepage, which garbles report symbols.
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
 
     args = _parse_args()
 
-    # Ensure the database schema exists (M5 business tables).
     ensure_schema()
 
-    # --list: show past audit runs and exit.
     if args.list:
         runs = list_runs()
         if not runs:
@@ -203,7 +193,6 @@ def main() -> None:
             )
         return
 
-    # --visualize: generate charts from a past audit run and exit.
     if args.visualize:
         if not args.run_id:
             print("Error: --run-id is required with --visualize.")
@@ -240,11 +229,9 @@ def main() -> None:
         print("Error: csv_path is required (use --list to see past runs).")
         return
 
-    # run_id is the LangGraph thread_id for this audit run.
+    # run_id doubles as the LangGraph thread_id, linking the two histories.
     run_id = args.thread_id or str(uuid.uuid4())
 
-    # Build the graph with the PostgresSaver checkpointer. The graph runs to
-    # completion in a single invoke() — there is no human-in-the-loop pause.
     with _persisted_graph(args.agent) as graph:
         config = {"configurable": {"thread_id": run_id}}
 
@@ -265,8 +252,7 @@ def main() -> None:
         report = state.get("report")
         report_text = state.get("report_text")
 
-        # Persist the completed run to business tables (PostgresSaver already
-        # saved the graph checkpoints to its own tables).
+        # PostgresSaver only stores graph state; findings go to the business tables too.
         findings_raw = state.get("findings") or []
         findings_data = [
             {

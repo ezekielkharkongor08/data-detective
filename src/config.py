@@ -1,7 +1,7 @@
 """Application settings loaded from environment / .env (M4).
 
-All model and LLM configuration lives in `.env`, never hardcoded in code
-(AGENTS.md rule). Copy `.env.example` to `.env` and adjust the values.
+All configuration lives in `.env` (never hardcoded). Copy `.env.example`
+to `.env` and adjust the values.
 """
 
 from functools import lru_cache
@@ -19,26 +19,20 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # LLM provider:
     llm_provider: str = "ollama"
-    # Model name served by the provider 
     llm_model: str = "llama3.1:8b"
-    # Base URL of the Ollama server.
     ollama_base_url: str = "http://localhost:11434"
-    # Sampling temperature (0.0 = deterministic).
+    # 0.0 = deterministic.
     llm_temperature: float = 0.0
-    # Optional max tokens for the model response.
     llm_max_tokens: int | None = None
 
-    # PostgreSQL connection settings (individual components).
     postgres_host: str = "localhost"
     postgres_port: int = 5432
     postgres_user: str = "postgres"
     postgres_password: str = ""
     postgres_db: str = "data_detective"
 
-    # Full SQLAlchemy connection URL. If not set explicitly, it is built from
-    # the postgres_* components above (M5 persistence).
+    # Built from the postgres_* fields above when not set directly.
     database_url: str | None = None
 
     @model_validator(mode="after")
@@ -56,8 +50,7 @@ class Settings(BaseSettings):
     def postgres_conn_string(self) -> str:
         """Return a psycopg-native connection string (no SQLAlchemy dialect).
 
-        PostgresSaver connects via psycopg directly, which expects
-        ``postgresql://`` not ``postgresql+psycopg://``.
+        PostgresSaver expects ``postgresql://``, not the SQLAlchemy form.
         """
         if self.database_url:
             return self.database_url.replace("postgresql+psycopg://", "postgresql://")

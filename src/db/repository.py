@@ -1,11 +1,8 @@
 """Repository layer for M5 persistence.
 
-Higher-level CRUD over the SQLAlchemy models: list audit runs, save a completed
-run (findings + report), load a run by run_id, and register datasets.
-
-Note: LangGraph checkpoints are managed by ``PostgresSaver`` in its own tables.
-This repository only touches business tables: ``datasets``, ``audit_runs``,
-``findings``, ``reports``.
+Higher-level CRUD over the SQLAlchemy models: list runs, save a completed run
+(findings + report), load by run_id, and register datasets. Only touches
+business tables; LangGraph checkpoints belong to ``PostgresSaver``.
 """
 
 from __future__ import annotations
@@ -116,7 +113,6 @@ def save_run(
                 run.findings_count = len(findings)
             session.flush()
 
-        # Replace findings for this run
         if findings is not None:
             session.query(Finding).filter_by(audit_run_id=run.id).delete()
             for f in findings:
@@ -131,7 +127,6 @@ def save_run(
                     )
                 )
 
-        # Upsert report
         if report_json is not None:
             existing_report = session.query(Report).filter_by(audit_run_id=run.id).first()
             if existing_report:

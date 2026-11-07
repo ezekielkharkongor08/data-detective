@@ -1,47 +1,11 @@
 """Check registry: the single place a check is declared.
 
-Adding a check is one file. Create ``src/tools/checks/my_check.py``, write a
-function that returns ``list[Finding]``, and decorate it with
-``@register_check(...)``. The graph builder, the parallel fan-out, the agent
-tools, the LLM prompt, and the contract test all read this registry, so no
-other file needs editing.
-
-Metadata a check declares
--------------------------
-``name``
-    Stable identifier. Used in findings, ``check_params`` keys, and skip notes.
-``run``
-    The function that returns ``list[Finding]`` (supplied by the decorator).
-``required``
-    State keys that must be present before the check runs (for example
-    ``csv_path`` or ``target_column``). A missing required key skips the check
-    with one informational note.
-``optional``
-    Param names read from ``state["check_params"][name]`` (for example
-    ``sensitive_columns`` or ``favorable_value``).
-``target_types``
-    Target types the check supports. ``{"any"}`` disables gating.
-``severity_key``
-    Key into the severity-threshold config (kept for the thresholds step).
-``description``
-    One line used to generate the agent tool and the LLM prompt.
-``always``
-    Tell the agent to call this check on every dataset (used to build the
-    LLM prompt). Checks that only need ``csv_path`` usually set this.
-``target_hint``
-    Tell the agent to call this check when a target column is provided.
-    Used only to build the LLM prompt guidance.
-``param_types``
-    Optional ``(name, python_type)`` pairs used to build the generated agent
-    tool's argument schema. Unknown params default to ``str``.
-``parallel``
-    Include in the M2 parallel fan-out.
-``agent_tool``
-    Expose to the ReAct agent.
-``fallback``
-    Include in the deterministic fallback used when the LLM is unavailable.
-``tool_name``
-    Optional override for the generated agent tool name.
+Adding a check is one file: write a function returning ``list[Finding]`` and
+decorate it with ``@register_check(...)``. The graph builder, agent tools,
+LLM prompt, and tests all read this registry, so no other file needs editing.
+``name`` and ``run`` are set automatically; the other metadata fields
+(required, optional, target_types, param_types, parallel, agent_tool,
+fallback, accepted_semantic) control how and where the check is used.
 """
 
 from __future__ import annotations
@@ -249,30 +213,11 @@ def run_check(
 ) -> list[Finding]:
     """Run one check using parameters from graph state.
 
-    The CSV is loaded exactly once here and passed to the check as ``df``,
-    so individual checks no longer read from disk and no longer duplicate
-    the CSV-load try/except boilerplate.
-
-    The function applies the registry contract in one place:
-
-    1. A missing ``csv_path`` becomes one informational note.
-    2. A CSV read failure becomes one HIGH error finding.
-    3. A missing other required input becomes one informational note.
-    4. Optional params come from ``state["check_params"][spec.name]``.
-    5. An unsupported target type becomes one informational note.
-
-    Unexpected exceptions from the check itself are deliberately left to the
-    caller so a graph node can convert them into an error finding without
-    losing the rest of the run.
-
-    Args:
-        spec: The check to run.
-        state: Graph state (or a minimal dict in tests).
-        run_fn: Optional override for the function to call. Used by tests that
-            patch a check without mutating the frozen spec.
-
-    Returns:
-        The findings from the check, or a single informational/error note.
+    Loads the CSV once centrally and applies the registry contract: missing
+    inputs and unsupported target types become informational notes, CSV read
+    failures become HIGH error findings, and optional params come from
+    ``state["check_params"][spec.name]``. Unexpected check exceptions are
+    left to the caller so the rest of the run survives.
     """
     csv_path = state.get("csv_path")
     if not csv_path or (isinstance(csv_path, str) and not csv_path.strip()):

@@ -1,17 +1,8 @@
 """Detect what kind of target a dataset has.
 
-Checks declare the target types they support (see
-:mod:`src.tools.checks.registry`). The registry runner uses this helper to
-skip a check with one informational note instead of crashing on an
-unsupported target.
-
-Target types
-------------
-- ``binary``: exactly two distinct non-null values (``0/1``, yes/no, True/False)
-- ``multiclass``: more than two distinct values that are not continuous
-- ``continuous``: numeric with many distinct values relative to row count
-- ``boolean``: a real ``bool`` dtype
-- ``unknown``: empty, all-null, or a single distinct value
+Checks declare the target types they support; the registry runner uses this
+helper to skip a check with one informational note instead of crashing.
+Types: binary, multiclass, continuous, boolean, unknown.
 """
 
 from __future__ import annotations
@@ -26,15 +17,8 @@ from src.check_config import check_config
 
 
 def detect_target_type(series: pd.Series) -> str:
-    """Return the target type of ``series``.
-
-    Args:
-        series: The target column.
-
-    Returns:
-        One of ``binary``, ``multiclass``, ``continuous``, ``boolean``,
-        ``unknown``.
-    """
+    """Return one of ``binary``, ``multiclass``, ``continuous``,
+    ``boolean``, or ``unknown`` for ``series``."""
     clean = series.dropna()
     if clean.empty:
         return "unknown"

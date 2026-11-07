@@ -1,14 +1,8 @@
 """SQLAlchemy ORM models for M5 persistence.
 
-Tables:
-- ``datasets``      - registered CSV datasets audited by Data Detective
-- ``audit_runs``    - one row per audit run (run_id == LangGraph thread_id)
-- ``findings``      - structured findings extracted from each run
-- ``reports``       - final audit report (JSON + text) per run
-
-Note: LangGraph checkpoints are managed by ``PostgresSaver`` in its own
-tables (``checkpoints``, ``checkpoint_writes``). Those are separate from
-these business tables and must not be mixed.
+One table per concept: datasets, audit runs, findings, and reports. LangGraph
+checkpoints live in separate ``PostgresSaver`` tables and must not be mixed
+with these business tables.
 """
 
 from __future__ import annotations

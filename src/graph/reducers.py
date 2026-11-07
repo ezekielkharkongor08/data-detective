@@ -1,20 +1,11 @@
 """State reducers for the Data Detective graph.
 
-LangGraph applies a reducer whenever a node returns a field declared as
-``Annotated[T, reducer]``. The ``findings`` list must be **idempotent**: a
-check may run more than once (for example when a thread is re-invoked), and
-the same finding must never appear twice in the report.
-
-Why this exists
----------------
-Before this module the field used ``operator.add``, which only concatenates.
-Re-invoking a thread that already held checkpointed findings appended a
-second copy of every finding. This reducer is the safety net: even if a check
-runs twice, the report sees each finding once.
+LangGraph applies a reducer whenever a node returns an ``Annotated[T,
+reducer]`` field. ``findings`` needs an idempotent reducer: re-invoking a
+thread that already holds checkpointed findings would otherwise append a
+second copy of every finding (plain concatenation is not enough).
 
 The dedupe key is ``(check_name, sorted(affected_columns), sha256(evidence))``.
-Two findings with the same check, the same affected columns (in any order),
-and the same evidence are the same finding.
 """
 
 from __future__ import annotations
@@ -23,30 +14,19 @@ import hashlib
 
 
 def stable_evidence_key(evidence: str | None) -> str:
-    """Return a deterministic hash of a finding's evidence text.
+    """Return a deterministic SHA-256 hash of a finding's evidence text.
 
-    Surrounding whitespace is stripped so trivially different copies of the
-    same evidence collapse to one key. The hash keeps the key short and avoids
-    holding long evidence strings in a set.
-
-    Args:
-        evidence: The human-readable evidence string (may be ``None``).
-
-    Returns:
-        A lowercase SHA-256 hex digest of the stripped evidence.
+    Whitespace is stripped first so trivially different copies collapse to
+    one key.
     """
     text = (evidence or "").strip()
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def finding_dedup_key(finding: dict) -> tuple[str, tuple[str, ...], str]:
-    """Build the identity key used to decide whether two findings are equal.
+    """Build the identity key deciding whether two findings are equal.
 
-    Args:
-        finding: A serialized :class:`~src.schemas.finding.Finding` dict.
-
-    Returns:
-        ``(check_name, sorted affected columns, evidence hash)``.
+    Returns ``(check_name, sorted affected columns, evidence hash)``.
     """
     return (
         str(finding.get("check_name", "")),
@@ -61,16 +41,8 @@ def merge_findings(
 ) -> list[dict]:
     """Idempotent reducer: concatenate findings and drop duplicates.
 
-    The first occurrence wins, so checkpointed findings keep their original
-    order and severity. Applying this reducer twice to the same inputs returns
-    the same list (idempotent).
-
-    Args:
-        existing: Findings already in state (may be ``None``).
-        new: Findings returned by a node (may be ``None``).
-
-    Returns:
-        A deduplicated list of finding dicts.
+    First occurrence wins, so checkpointed findings keep their original order.
+    Applying the reducer twice to the same inputs returns the same list.
     """
     merged: list[dict] = []
     seen: set[tuple[str, tuple[str, ...], str]] = set()

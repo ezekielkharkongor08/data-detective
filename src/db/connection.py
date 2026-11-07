@@ -1,7 +1,7 @@
 """Database connection setup using SQLAlchemy + PostgreSQL.
 
-All database access goes through SQLAlchemy sessions. The connection URL is
-read from ``DATABASE_URL`` in ``.env`` (never hardcoded, per AGENTS.md rule).
+All database access goes through SQLAlchemy sessions. The URL comes from
+``DATABASE_URL`` in ``.env`` (never hardcoded).
 """
 
 from __future__ import annotations
@@ -50,10 +50,8 @@ def _admin_connection_string() -> str:
 def create_database_if_not_exists() -> None:
     """Create the target PostgreSQL database if it does not exist.
 
-    Connects to the ``postgres`` admin database, checks whether
-    ``settings.postgres_db`` exists, and creates it if missing. This is
-    necessary because SQLAlchemy cannot create a database from within itself
-    — you must connect to a different database first.
+    SQLAlchemy cannot create a database while connected to it, so this
+    connects to the ``postgres`` admin database first.
     """
     admin_engine = create_engine(_admin_connection_string(), isolation_level="AUTOCOMMIT")
     try:

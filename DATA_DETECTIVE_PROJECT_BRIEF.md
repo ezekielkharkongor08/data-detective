@@ -138,7 +138,7 @@ Tick each box when done and update section 1.
 - [ ] **M5 — Persistence and memory:** Postgres checkpointer, saved audit history, resume and replay a run
 - [ ] **M7 — Backend:** FastAPI endpoints (start audit, check status, get report), Postgres tables, Docker
 - [ ] **M8 — Evaluation and tracing:** planted-problem test sets, detection score, tracing dashboard
-- [ ] **M9 — Polish:** README, architecture diagram, demo video, CV bullets
+- [ ] **M9 — Polish:** README, architecture diagram, CV bullets
 
 ## 10. Datasets
 
