@@ -19,11 +19,10 @@ def _write_csv(df: pd.DataFrame) -> str:
 
 def test_outlier_check_many_outliers():
     """A column with many outliers produces a HIGH finding."""
-    # 10 values, with 2 clear outliers (100, 200) relative to the cluster.
-    # Q1=1.25, Q3=3, IQR=1.75, upper_bound=5.625 → 100 and 200 are outliers.
+    # 18 unique values: normal range 1-16 plus extreme outliers 100, 200, 300, 400.
     df = pd.DataFrame({
-        "outlier_col": [1, 1, 1, 2, 2, 2, 3, 3, 100, 200],
-        "target": [0, 1, 0, 1, 0, 1, 0, 1, 0, 1],
+        "outlier_col": list(range(1, 17)) + [100, 200, 300, 400],
+        "target": [0, 1] * 10,
     })
     findings = outlier_check(df)
     assert len(findings) == 1

@@ -17,6 +17,7 @@ import pandas as pd
 from src.check_config import check_config
 from src.schemas.finding import Finding, Severity
 from src.tools.checks.registry import register_check
+from src.tools.target_type import detect_target_type
 
 
 @register_check(
@@ -49,6 +50,10 @@ def imbalance_check(
 
     target = df[target_column].dropna()
     if len(target) == 0:
+        return []
+
+    target_type = detect_target_type(target)
+    if target_type == "continuous":
         return []
 
     value_counts = target.value_counts(normalize=True)

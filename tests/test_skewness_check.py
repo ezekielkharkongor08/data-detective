@@ -19,11 +19,11 @@ def _write_csv(df: pd.DataFrame) -> str:
 
 def test_skewness_check_high_skew():
     """A highly skewed numeric column produces a HIGH finding."""
-    # Exponential-like data: many small values, few large ones.
+    # 16 unique values with extreme right skew.
     df = pd.DataFrame({
-        "skewed": [1, 1, 1, 1, 1, 1, 1, 1, 1, 100],
-        "normal": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
-        "target": [0, 1, 0, 1, 0, 1, 0, 1, 0, 1],
+        "skewed": list(range(1, 16)) + [1000],
+        "normal": list(range(1, 17)),
+        "target": [0, 1] * 8,
     })
     findings = skewness_check(df)
     assert len(findings) == 1

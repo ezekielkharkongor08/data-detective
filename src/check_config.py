@@ -99,6 +99,60 @@ class OutlierConfig:
 
 
 @dataclass(frozen=True)
+class SemanticConfig:
+    """Thresholds for column semantic classification.
+
+    Every ratio uses n_eff (the count of non-missing values in a column),
+    never the raw row count. A column with many missing values is therefore
+    not misclassified just because the dataset is large.
+
+    Why each threshold is a ratio:
+      - Ratios are scale-free: the same rule behaves identically on a
+        100-row and a 100,000-row file.
+      - Absolute counts tuned to one dataset would misfire on any other
+        size, which is exactly what this design avoids.
+    """
+
+    # Minimum non-missing values needed before uniqueness-based rules run.
+    # Below this, classification relies on dtype and exact-two-values only
+    # and is marked ambiguous.
+    MIN_ROWS: int = 50
+
+    # Fixed deterministic sample used for expensive parse/pairwise tests.
+    SAMPLE_SIZE: int = 2000
+
+    # String -> datetime parse ratio required to call a text column a date.
+    DATE_PARSE_RATIO: float = 0.8
+
+    # String -> number parse ratio required to take the numeric path.
+    NUMERIC_PARSE_RATIO: float = 0.9
+
+    # Uniqueness share (nunique / n_eff) above which a column is
+    # identifier-like.
+    IDENTIFIER_UNIQUE_RATIO: float = 0.99
+
+    # One-to-one mapping ratio required to treat an int column as an encoded
+    # duplicate of a text column.
+    ENCODED_DUP_RATIO: float = 0.95
+
+    # Max candidate columns per side for the encoded-duplicate pairwise scan.
+    PAIRWISE_CAP: int = 30
+
+    # Cardinality ratio at or below which a string column is categorical.
+    CARDINALITY_RATIO: float = 0.05
+
+    # Integer columns with at most this many distinct values may be discrete.
+    DISCRETE_MAX_UNIQUE: int = 20
+
+    # Small absolute distinct-value cap for treating low-cardinality text as
+    # categorical.
+    DISCRETE_ABS_CAP: int = 20
+
+    # Parse ratio below which confidence is reduced.
+    PARSE_HIGH_CONF: float = 0.99
+
+
+@dataclass(frozen=True)
 class CheckConfig:
     """All check thresholds grouped by check name."""
 
@@ -111,6 +165,7 @@ class CheckConfig:
     target_type: TargetTypeConfig = TargetTypeConfig()
     skewness: SkewnessConfig = SkewnessConfig()
     outliers: OutlierConfig = OutlierConfig()
+    semantic: SemanticConfig = SemanticConfig()
 
 
 # Module-level instance used by all checks.
@@ -128,5 +183,6 @@ __all__ = [
     "TargetTypeConfig",
     "SkewnessConfig",
     "OutlierConfig",
+    "SemanticConfig",
     "check_config",
 ]

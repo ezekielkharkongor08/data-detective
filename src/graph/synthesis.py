@@ -11,6 +11,7 @@ from typing import Any, Callable
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from src.graph.llm_context import build_llm_digest, DEFAULT_BUDGET_TOKENS
 from src.graph.state import GraphState
 from src.schemas.finding import Finding, Severity
 from src.schemas.report import AuditReport, SynthesisResult
@@ -152,18 +153,6 @@ def _compact_finding(f: dict) -> dict:
     }
 
 
-def _compact_profile(profile: dict) -> dict:
-    """Shrink the profile for the prompt. Falls back to the full profile."""
-    try:
-        compact = {k: v for k, v in profile.items() if k != "sample_rows"}
-        sample_rows = profile.get("sample_rows")
-        if isinstance(sample_rows, list):
-            compact["sample_rows"] = sample_rows[:2]
-        return compact
-    except Exception:  # noqa: BLE001 - never break the node over trimming
-        return profile
-
-
 def _build_payload(profile: dict, findings: list) -> str:
     """Build the JSON payload sent to the LLM.
 
@@ -180,8 +169,10 @@ def _build_payload(profile: dict, findings: list) -> str:
     for f in ordered:
         name = _sev_name(f)
         counts[name] = counts.get(name, 0) + 1
+    # The LLM receives a compact digest, never the full profile. The full
+    # profile stays in state, the DB, and the report.
     payload = {
-        "profile": _compact_profile(profile),
+        "profile": build_llm_digest(profile, DEFAULT_BUDGET_TOKENS),
         "findings": [_compact_finding(f) for f in shown],
         "facts": {
             "total_findings": len(ordered),

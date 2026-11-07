@@ -395,10 +395,7 @@ def bias_check(
     target = df[target_column]
     target_type = detect_target_type(target)
     if target_type not in ("binary", "boolean"):
-        return _skip(
-            f"Skipped: fairness supports binary or boolean targets only; "
-            f"target '{target_column}' is {target_type}."
-        )
+        return []
 
     if not sensitive_columns:
         hints = _hint_candidates(df, target_column)

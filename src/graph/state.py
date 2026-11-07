@@ -30,6 +30,11 @@ class GraphState(TypedDict, total=False):
     # declared, so adding a check needs no state-field changes.
     check_params: dict[str, dict]
 
+    # Semantic type overrides from --semantic-override CLI flag:
+    #   {column_name: semantic_type}. Applied by classify_columns in profile_node.
+    #   Rule 0: overrides win over every classifier rule.
+    semantic_overrides: dict[str, str]
+
     # Merged findings from all parallel checks. ``merge_findings`` is the
     # reducer: it concatenates lists returned by parallel branches and drops
     # duplicates, so a repeated finding can never appear twice in the report.

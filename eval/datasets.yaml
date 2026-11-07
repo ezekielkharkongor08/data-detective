@@ -1,0 +1,30 @@
+# Data Detective — dataset registry for the eval harness.
+#
+# Each dataset lists its target column, sensitive columns (for fairness), and
+# the favorable outcome value. Paths are relative to the repo root and point
+# into read-only data/raw/.
+
+datasets:
+  - name: telco
+    path: data/raw/Churn.csv
+    target: Churn
+    sensitive: [gender]
+    favorable: Yes
+
+  - name: adult
+    path: data/raw/adult.csv
+    target: income
+    sensitive: [sex, race]
+    favorable: ">50K"
+
+  - name: house
+    path: data/raw/House.csv
+    target: price
+    sensitive: []
+    favorable: null
+
+  - name: titanic
+    path: data/raw/titanic.csv
+    target: Survived
+    sensitive: [Sex]
+    favorable: "1"

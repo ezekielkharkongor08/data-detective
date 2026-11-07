@@ -145,11 +145,15 @@ def run_checks_with_agent(
     """
     agent = build_check_agent(llm, tools=tools)
 
-    profile_json = json.dumps(profile, default=str)
+    # The LLM receives a compact digest, never the full profile. The full
+    # profile stays in state, the DB, and the report.
+    from src.graph.llm_context import build_llm_digest
+
+    profile_digest = build_llm_digest(profile)
     request = {
         "dataset": csv_path,
         "target_column": target_column,
-        "profile": profile_json,
+        "profile": profile_digest,
     }
 
     messages = [

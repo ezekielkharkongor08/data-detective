@@ -1,0 +1,383 @@
+# Data Detective — column semantic classification gold set.
+#
+# Hand-labelled expected semantic type for every column of each dataset.
+# Labels were assigned from domain knowledge of the datasets; the classifier
+# was NOT run on these files to produce them (avoids circular labels).
+#
+# Hold-out datasets (titanic, house) are sealed: do not run the classifier on
+# them until the rules are frozen. Their labels are still filled in here so
+# the gold set is complete, but they must not be used to tune thresholds.
+#
+# Columns:
+#   dataset        : short name used in tests
+#   path           : CSV path relative to repo root (read-only data/raw)
+#   hold_out       : true = sealed until rules are frozen
+#   columns        : one entry per column
+#     column            : column name
+#     dtype             : pandas dtype as read from the CSV
+#     samples           : three raw sample values (as strings), for context
+#     expected_type     : one of
+#       numeric_measurement, numeric_discrete, binary, categorical,
+#       ordinal_candidate, datetime, identifier, text, constant, unknown
+#     expected_ambiguous: true / false. true = values alone cannot determine
+#       the type confidently (e.g. years, small integer codes); the classifier
+#       should flag it and await a --semantic-override.
+
+datasets:
+  - name: telco
+    path: data/raw/Churn.csv
+    n_rows: 7043
+    n_cols: 21
+    hold_out: false
+    columns:
+      - column: customerID
+        dtype: str
+        samples: ["7590-VHVEG", "5575-GNVDE", "3668-QPYBK"]
+        expected_type: identifier
+        expected_ambiguous: false
+      - column: gender
+        dtype: str
+        samples: ["Female", "Male", "Male"]
+        expected_type: binary
+        expected_ambiguous: false
+      - column: SeniorCitizen
+        dtype: int64
+        samples: ["0", "0", "0"]
+        expected_type: binary
+        expected_ambiguous: false
+      - column: Partner
+        dtype: str
+        samples: ["Yes", "No", "No"]
+        expected_type: binary
+        expected_ambiguous: false
+      - column: Dependents
+        dtype: str
+        samples: ["No", "No", "No"]
+        expected_type: binary
+        expected_ambiguous: false
+      - column: tenure
+        dtype: int64
+        samples: ["1", "34", "2"]
+        expected_type: numeric_discrete
+        expected_ambiguous: false
+      - column: PhoneService
+        dtype: str
+        samples: ["No", "Yes", "Yes"]
+        expected_type: binary
+        expected_ambiguous: false
+      - column: MultipleLines
+        dtype: str
+        samples: ["No phone service", "No", "No"]
+        expected_type: categorical
+        expected_ambiguous: false
+      - column: InternetService
+        dtype: str
+        samples: ["DSL", "DSL", "DSL"]
+        expected_type: categorical
+        expected_ambiguous: false
+      - column: OnlineSecurity
+        dtype: str
+        samples: ["No", "Yes", "Yes"]
+        expected_type: categorical
+        expected_ambiguous: false
+      - column: OnlineBackup
+        dtype: str
+        samples: ["Yes", "No", "Yes"]
+        expected_type: categorical
+        expected_ambiguous: false
+      - column: DeviceProtection
+        dtype: str
+        samples: ["No", "Yes", "No"]
+        expected_type: categorical
+        expected_ambiguous: false
+      - column: TechSupport
+        dtype: str
+        samples: ["No", "No", "No"]
+        expected_type: categorical
+        expected_ambiguous: false
+      - column: StreamingTV
+        dtype: str
+        samples: ["No", "No", "No"]
+        expected_type: categorical
+        expected_ambiguous: false
+      - column: StreamingMovies
+        dtype: str
+        samples: ["No", "No", "No"]
+        expected_type: categorical
+        expected_ambiguous: false
+      - column: Contract
+        dtype: str
+        samples: ["Month-to-month", "One year", "Month-to-month"]
+        expected_type: categorical
+        expected_ambiguous: false
+      - column: PaperlessBilling
+        dtype: str
+        samples: ["Yes", "No", "Yes"]
+        expected_type: binary
+        expected_ambiguous: false
+      - column: PaymentMethod
+        dtype: str
+        samples: ["Electronic check", "Mailed check", "Mailed check"]
+        expected_type: categorical
+        expected_ambiguous: false
+      - column: MonthlyCharges
+        dtype: float64
+        samples: ["29.85", "56.95", "53.85"]
+        expected_type: numeric_measurement
+        expected_ambiguous: false
+      - column: TotalCharges
+        dtype: str
+        samples: ["29.85", "1889.5", "108.15"]
+        expected_type: numeric_measurement
+        expected_ambiguous: false
+      - column: Churn
+        dtype: str
+        samples: ["No", "No", "Yes"]
+        expected_type: binary
+        expected_ambiguous: false
+
+  - name: adult
+    path: data/raw/adult.csv
+    n_rows: 32561
+    n_cols: 15
+    hold_out: false
+    columns:
+      - column: age
+        dtype: int64
+        samples: ["90", "82", "66"]
+        expected_type: numeric_measurement
+        expected_ambiguous: false
+      - column: workclass
+        dtype: str
+        samples: ["?", "Private", "?"]
+        expected_type: categorical
+        expected_ambiguous: false
+      - column: fnlwgt
+        dtype: int64
+        samples: ["77053", "132870", "186061"]
+        expected_type: numeric_measurement
+        expected_ambiguous: false
+      - column: education
+        dtype: str
+        samples: ["HS-grad", "HS-grad", "Some-college"]
+        expected_type: categorical
+        expected_ambiguous: false
+      - column: education.num
+        dtype: int64
+        samples: ["9", "9", "10"]
+        expected_type: categorical
+        expected_ambiguous: false
+      - column: marital.status
+        dtype: str
+        samples: ["Widowed", "Widowed", "Widowed"]
+        expected_type: categorical
+        expected_ambiguous: false
+      - column: occupation
+        dtype: str
+        samples: ["?", "Exec-managerial", "?"]
+        expected_type: categorical
+        expected_ambiguous: false
+      - column: relationship
+        dtype: str
+        samples: ["Not-in-family", "Not-in-family", "Unmarried"]
+        expected_type: categorical
+        expected_ambiguous: false
+      - column: race
+        dtype: str
+        samples: ["White", "White", "Black"]
+        expected_type: categorical
+        expected_ambiguous: false
+      - column: sex
+        dtype: str
+        samples: ["Female", "Female", "Female"]
+        expected_type: binary
+        expected_ambiguous: false
+      - column: capital.gain
+        dtype: int64
+        samples: ["0", "0", "0"]
+        expected_type: numeric_measurement
+        expected_ambiguous: false
+      - column: capital.loss
+        dtype: int64
+        samples: ["4356", "4356", "4356"]
+        expected_type: numeric_measurement
+        expected_ambiguous: false
+      - column: hours.per.week
+        dtype: int64
+        samples: ["40", "18", "40"]
+        expected_type: numeric_discrete
+        expected_ambiguous: false
+      - column: native.country
+        dtype: str
+        samples: ["United-States", "United-States", "United-States"]
+        expected_type: categorical
+        expected_ambiguous: false
+      - column: income
+        dtype: str
+        samples: ["<=50K", "<=50K", "<=50K"]
+        expected_type: binary
+        expected_ambiguous: false
+
+  - name: house
+    path: data/raw/House.csv
+    n_rows: 4600
+    n_cols: 18
+    hold_out: true
+    columns:
+      - column: date
+        dtype: str
+        samples: ["2014-05-02 00:00:00", "2014-05-02 00:00:00", "2014-05-02 00:00:00"]
+        expected_type: datetime
+        expected_ambiguous: false
+      - column: price
+        dtype: float64
+        samples: ["313000.0", "2384000.0", "342000.0"]
+        expected_type: numeric_measurement
+        expected_ambiguous: false
+      - column: bedrooms
+        dtype: float64
+        samples: ["3.0", "5.0", "3.0"]
+        expected_type: numeric_measurement
+        expected_ambiguous: false
+      - column: bathrooms
+        dtype: float64
+        samples: ["1.5", "2.5", "2.0"]
+        expected_type: numeric_measurement
+        expected_ambiguous: false
+      - column: sqft_living
+        dtype: int64
+        samples: ["1340", "3650", "1930"]
+        expected_type: numeric_measurement
+        expected_ambiguous: false
+      - column: sqft_lot
+        dtype: int64
+        samples: ["7912", "9050", "11947"]
+        expected_type: numeric_measurement
+        expected_ambiguous: false
+      - column: floors
+        dtype: float64
+        samples: ["1.5", "2.0", "1.0"]
+        expected_type: numeric_discrete
+        expected_ambiguous: false
+      - column: waterfront
+        dtype: int64
+        samples: ["0", "0", "0"]
+        expected_type: binary
+        expected_ambiguous: false
+      - column: view
+        dtype: int64
+        samples: ["0", "4", "0"]
+        expected_type: ordinal_candidate
+        expected_ambiguous: true
+      - column: condition
+        dtype: int64
+        samples: ["3", "5", "4"]
+        expected_type: ordinal_candidate
+        expected_ambiguous: true
+      - column: sqft_above
+        dtype: int64
+        samples: ["1340", "3370", "1930"]
+        expected_type: numeric_measurement
+        expected_ambiguous: false
+      - column: sqft_basement
+        dtype: int64
+        samples: ["0", "280", "0"]
+        expected_type: numeric_measurement
+        expected_ambiguous: false
+      - column: yr_built
+        dtype: int64
+        samples: ["1955", "1921", "1966"]
+        expected_type: unknown
+        expected_ambiguous: true
+      - column: yr_renovated
+        dtype: int64
+        samples: ["2005", "0", "0"]
+        expected_type: numeric_measurement
+        expected_ambiguous: false
+      - column: street
+        dtype: str
+        samples: ["18810 Densmore Ave N", "709 W Blaine St", "26206-26214 143rd Ave SE"]
+        expected_type: text
+        expected_ambiguous: false
+      - column: city
+        dtype: str
+        samples: ["Shoreline", "Seattle", "Kent"]
+        expected_type: categorical
+        expected_ambiguous: false
+      - column: statezip
+        dtype: str
+        samples: ["WA 98133", "WA 98119", "WA 98042"]
+        expected_type: categorical
+        expected_ambiguous: false
+      - column: country
+        dtype: str
+        samples: ["USA", "USA", "USA"]
+        expected_type: constant
+        expected_ambiguous: false
+
+  - name: titanic
+    path: data/raw/titanic.csv
+    n_rows: 891
+    n_cols: 12
+    hold_out: true
+    columns:
+      - column: PassengerId
+        dtype: int64
+        samples: ["1", "2", "3"]
+        expected_type: identifier
+        expected_ambiguous: false
+      - column: Survived
+        dtype: int64
+        samples: ["0", "1", "1"]
+        expected_type: binary
+        expected_ambiguous: false
+      - column: Pclass
+        dtype: int64
+        samples: ["3", "1", "3"]
+        expected_type: ordinal_candidate
+        expected_ambiguous: true
+      - column: Name
+        dtype: str
+        samples: ["Braund, Mr. Owen Harris", "Cumings, Mrs. John Bradley (Florence Briggs Thayer)", "Heikkinen, Miss. Laina"]
+        expected_type: text
+        expected_ambiguous: false
+      - column: Sex
+        dtype: str
+        samples: ["male", "female", "female"]
+        expected_type: binary
+        expected_ambiguous: false
+      - column: Age
+        dtype: float64
+        samples: ["22.0", "38.0", "26.0"]
+        expected_type: numeric_measurement
+        expected_ambiguous: false
+      - column: SibSp
+        dtype: int64
+        samples: ["1", "1", "0"]
+        expected_type: numeric_discrete
+        expected_ambiguous: false
+      - column: Parch
+        dtype: int64
+        samples: ["0", "0", "0"]
+        expected_type: numeric_discrete
+        expected_ambiguous: false
+      - column: Ticket
+        dtype: str
+        samples: ["A/5 21171", "PC 17599", "STON/O2. 3101282"]
+        expected_type: text
+        expected_ambiguous: false
+      - column: Fare
+        dtype: float64
+        samples: ["7.25", "71.2833", "7.925"]
+        expected_type: numeric_measurement
+        expected_ambiguous: false
+      - column: Cabin
+        dtype: str
+        samples: ["C85", "C123", "E46"]
+        expected_type: text
+        expected_ambiguous: false
+      - column: Embarked
+        dtype: str
+        samples: ["S", "C", "S"]
+        expected_type: categorical
+        expected_ambiguous: false

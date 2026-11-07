@@ -15,6 +15,7 @@ import pandas as pd
 from src.check_config import check_config
 from src.schemas.finding import Finding, Severity
 from src.tools.checks.registry import register_check
+from src.tools.target_type import detect_target_type
 
 
 @register_check(
@@ -23,6 +24,7 @@ from src.tools.checks.registry import register_check
     severity_key="outliers",
     description="Check numeric columns for excessive outliers using IQR.",
     always=True,
+    accepted_semantic=frozenset({"numeric_measurement", "numeric_discrete"}),
 )
 def outlier_check(df: pd.DataFrame, target_column: Optional[str] = None) -> list[Finding]:
     """Detect numeric columns with excessive outliers using the IQR method.
@@ -34,19 +36,34 @@ def outlier_check(df: pd.DataFrame, target_column: Optional[str] = None) -> list
     - outlier_pct > outlier_pct_threshold     -> MEDIUM
     - outlier_pct > high_outlier_pct_threshold -> HIGH
 
-    Non-numeric columns are skipped.
+    Columns are pre-filtered by the registry's semantic gating
+    (accepted_semantic = {numeric_measurement, numeric_discrete}), so
+    integer-coded categoricals, identifiers, and constants never reach here.
     """
     findings: list[Finding] = []
+
+    # Skip outlier check for classification targets — redundant with
+    # class_imbalance check. Outlier detection is only meaningful for
+    # regression targets.
+    if target_column and target_column in df.columns:
+        target = df[target_column].dropna()
+        if len(target) > 0:
+            target_type = detect_target_type(target)
+            if target_type in ("binary", "multiclass"):
+                return []
 
     for col in df.columns:
         series = df[col]
 
-        # Skip non-numeric columns safely.
+        # Basic type guard for direct callers (checks are normally gated by
+        # the registry's semantic gating, which restricts this check to
+        # numeric_measurement / numeric_discrete columns).
         if not pd.api.types.is_numeric_dtype(series):
             continue
 
         # Drop NaN before computing IQR.
         clean = series.dropna()
+
         if len(clean) < 4:
             # Not enough data for a meaningful IQR calculation.
             continue

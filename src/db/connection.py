@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Generator
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from src.config import get_settings
@@ -35,12 +35,47 @@ def get_db() -> Generator[Session, None, None]:
         db.close()
 
 
+def _admin_connection_string() -> str:
+    """Build a connection string to the postgres admin database.
+
+    CREATE DATABASE cannot run inside a transaction, so we connect to the
+    ``postgres`` maintenance database and run it with AUTOCOMMIT.
+    """
+    return (
+        f"postgresql+psycopg://{_settings.postgres_user}:{_settings.postgres_password}"
+        f"@{_settings.postgres_host}:{_settings.postgres_port}/postgres"
+    )
+
+
+def create_database_if_not_exists() -> None:
+    """Create the target PostgreSQL database if it does not exist.
+
+    Connects to the ``postgres`` admin database, checks whether
+    ``settings.postgres_db`` exists, and creates it if missing. This is
+    necessary because SQLAlchemy cannot create a database from within itself
+    — you must connect to a different database first.
+    """
+    admin_engine = create_engine(_admin_connection_string(), isolation_level="AUTOCOMMIT")
+    try:
+        with admin_engine.connect() as conn:
+            result = conn.execute(
+                text("SELECT 1 FROM pg_database WHERE datname = :dbname"),
+                {"dbname": _settings.postgres_db},
+            )
+            if result.fetchone() is None:
+                conn.execute(text(f'CREATE DATABASE "{_settings.postgres_db}"'))
+    finally:
+        admin_engine.dispose()
+
+
 def init_db() -> None:
     """Create all tables defined on ``Base``.
 
     Safe to call on startup; tables that already exist are left untouched.
+    Automatically creates the target database if it does not exist.
     """
+    create_database_if_not_exists()
     Base.metadata.create_all(bind=engine)
 
 
-__all__ = ["Base", "engine", "SessionLocal", "get_db", "init_db"]
+__all__ = ["Base", "engine", "SessionLocal", "get_db", "init_db", "create_database_if_not_exists"]

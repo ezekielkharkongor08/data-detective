@@ -15,6 +15,7 @@ import pandas as pd
 from src.check_config import check_config
 from src.schemas.finding import Finding, Severity
 from src.tools.checks.registry import register_check
+from src.tools.target_type import detect_target_type
 
 
 @register_check(
@@ -23,6 +24,7 @@ from src.tools.checks.registry import register_check
     severity_key="skewness",
     description="Check numeric columns for high skewness.",
     always=True,
+    accepted_semantic=frozenset({"numeric_measurement", "numeric_discrete"}),
 )
 def skewness_check(df: pd.DataFrame, target_column: Optional[str] = None) -> list[Finding]:
     """Detect numeric columns with high skew magnitude.
@@ -31,19 +33,33 @@ def skewness_check(df: pd.DataFrame, target_column: Optional[str] = None) -> lis
     - |skew| > skew_threshold    -> MEDIUM
     - |skew| > high_skew_threshold -> HIGH
 
-    Non-numeric columns are skipped.
+    Columns are pre-filtered by the registry's semantic gating
+    (accepted_semantic = {numeric_measurement, numeric_discrete}), so
+    integer-coded categoricals, identifiers, and constants never reach here.
     """
     findings: list[Finding] = []
+
+    # Skip skewness check for classification targets — redundant with
+    # class_imbalance check. Skewness is only meaningful for regression targets.
+    if target_column and target_column in df.columns:
+        target = df[target_column].dropna()
+        if len(target) > 0:
+            target_type = detect_target_type(target)
+            if target_type in ("binary", "multiclass"):
+                return []
 
     for col in df.columns:
         series = df[col]
 
-        # Skip non-numeric columns safely.
+        # Basic type guard for direct callers (checks are normally gated by
+        # the registry's semantic gating, which restricts this check to
+        # numeric_measurement / numeric_discrete columns).
         if not pd.api.types.is_numeric_dtype(series):
             continue
 
         # Drop NaN before computing skew.
         clean = series.dropna()
+
         if len(clean) < 3:
             # Not enough data for a meaningful skew calculation.
             continue

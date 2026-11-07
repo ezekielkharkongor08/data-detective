@@ -32,8 +32,9 @@ from contextlib import contextmanager
 from langgraph.checkpoint.postgres import PostgresSaver
 
 from src.config import get_settings
-from src.db.repository import ensure_schema, list_runs, save_run
+from src.db.repository import ensure_schema, get_run, list_runs, save_run
 from src.graph.builder import build_agent_graph, build_graph
+from src.workbench.visualizer.visualizer_graph import build_visualizer_graph
 
 
 def _parse_args() -> argparse.Namespace:
@@ -52,6 +53,17 @@ def _parse_args() -> argparse.Namespace:
         help=(
             "Sensitive column for the fairness check. Repeat the flag or use "
             "a comma-separated list."
+        ),
+    )
+    parser.add_argument(
+        "--semantic-override",
+        action="append",
+        default=[],
+        metavar="COLUMN=TYPE",
+        help=(
+            "Override the semantic type of a column (for example "
+            "'SeniorCitizen=binary'). Repeat the flag or use a comma-separated "
+            "list. Overrides win over every classifier rule."
         ),
     )
     parser.add_argument(
@@ -74,6 +86,16 @@ def _parse_args() -> argparse.Namespace:
         "--thread-id",
         default=None,
         help="Thread ID for this audit run (auto-generated if omitted).",
+    )
+    parser.add_argument(
+        "--visualize",
+        action="store_true",
+        help="Generate visualizations from a past audit run (requires --run-id).",
+    )
+    parser.add_argument(
+        "--run-id",
+        default=None,
+        help="Run ID of a past audit to visualize (use with --visualize).",
     )
     return parser.parse_args()
 
@@ -103,6 +125,39 @@ def _build_check_params(args: argparse.Namespace) -> dict[str, dict]:
         check_params["bias"] = bias_params
 
     return check_params
+
+
+def _build_semantic_overrides(args: argparse.Namespace) -> dict[str, str]:
+    """Translate ``--semantic-override COLUMN=TYPE`` flags into a dict.
+
+    Values are validated against ``SEMANTIC_TYPES``; invalid types produce a
+    warning and are skipped.
+    """
+    from src.tools.profiling import SEMANTIC_TYPES
+
+    overrides: dict[str, str] = {}
+    for value in args.semantic_override:
+        for part in value.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            if "=" not in part:
+                print(
+                    f"Warning: ignoring malformed --semantic-override "
+                    f"{part!r} (expected COLUMN=TYPE)."
+                )
+                continue
+            name, new_type = part.split("=", 1)
+            name = name.strip()
+            new_type = new_type.strip()
+            if new_type not in SEMANTIC_TYPES:
+                print(
+                    f"Warning: ignoring --semantic-override {part!r}: "
+                    f"unknown type {new_type!r}."
+                )
+                continue
+            overrides[name] = new_type
+    return overrides
 
 
 @contextmanager
@@ -148,6 +203,39 @@ def main() -> None:
             )
         return
 
+    # --visualize: generate charts from a past audit run and exit.
+    if args.visualize:
+        if not args.run_id:
+            print("Error: --run-id is required with --visualize.")
+            return
+        run = get_run(args.run_id)
+        if not run:
+            print(f"Error: no audit run found for run-id {args.run_id}.")
+            return
+        report_json = run.get("report_json") or {}
+        findings_in = report_json.get("findings") or []
+        csv_path = run.get("csv_path")
+        target_column = run.get("target_column")
+
+        graph = build_visualizer_graph()
+        state = graph.invoke(
+            {
+                "findings_in": findings_in,
+                "csv_path": csv_path,
+                "target_column": target_column,
+                "want_plots": True,
+            }
+        )
+
+        plot_paths = state.get("plot_paths") or []
+        if plot_paths:
+            print("Visualizer Workbench complete. Plots saved:")
+            for p in plot_paths:
+                print(f"  {p}")
+        else:
+            print("Visualizer Workbench complete. No plots were generated.")
+        return
+
     if not args.csv_path:
         print("Error: csv_path is required (use --list to see past runs).")
         return
@@ -165,6 +253,7 @@ def main() -> None:
                 "csv_path": args.csv_path,
                 "target_column": args.target,
                 "check_params": _build_check_params(args),
+                "semantic_overrides": _build_semantic_overrides(args),
             },
             config=config,
         )

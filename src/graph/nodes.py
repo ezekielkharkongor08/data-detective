@@ -164,13 +164,12 @@ def router_node(state: GraphState) -> GraphState:
 
 
 def deep_checks_node(state: GraphState) -> GraphState:
-    """Run the deep leakage check on the router-flagged suspect columns.
+    """Run the deep leakage check on all non-target columns.
 
-    When the router suspects leakage, the registry's ``target_leakage`` check
-    runs only on the ``suspect_columns`` stored in state (ID-like or
-    schema-flagged columns) instead of every non-target column. This avoids
-    running an expensive Cross-Validation loop on columns that have no
-    leakage signal.
+    Runs on every audit regardless of router suspicion, so that target
+    leakage detection (ROC AUC / R²) is always performed. The router's
+    ``suspect_columns`` are used when available to narrow the scan, but
+    when empty, all non-target columns are tested.
 
     Results are stored in ``deep_check_results`` and any leakage findings are
     returned to be merged into the findings list via the ``merge_findings``
@@ -178,20 +177,20 @@ def deep_checks_node(state: GraphState) -> GraphState:
     """
     csv_path = state.get("csv_path")
     target_column = state.get("target_column")
-    suspect_columns = state.get("suspect_columns") or []
 
     if not csv_path or not target_column:
         return {"deep_check_results": []}
 
-    # No suspect columns means there is nothing expensive to check.
-    if not suspect_columns:
-        return {"deep_check_results": []}
+    # Determine which columns to test. When suspect_columns is empty,
+    # pass None so target_leakage tests all non-target columns.
+    suspect_columns = state.get("suspect_columns") or []
+    suspicious_columns = suspect_columns if suspect_columns else None
 
     spec = get_check("target_leakage")
     deep_state = dict(state)
     deep_state["check_params"] = {
         **(state.get("check_params") or {}),
-        "target_leakage": {"suspicious_columns": suspect_columns},
+        "target_leakage": {"suspicious_columns": suspicious_columns},
     }
     findings = run_check(spec, deep_state)
 
@@ -380,8 +379,13 @@ def profile_node(state: GraphState) -> GraphState:
     if not csv_path:
         return {"error": "No csv_path in state; cannot profile."}
 
+    overrides = state.get("semantic_overrides") or {}
     try:
-        profile = profile_dataset(csv_path, target_column=state.get("target_column"))
+        profile = profile_dataset(
+            csv_path,
+            target_column=state.get("target_column"),
+            overrides=overrides,
+        )
     except Exception as exc:  # noqa: BLE001 — surface any load error in state
         return {"error": f"Failed to profile {csv_path}: {exc}"}
 

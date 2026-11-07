@@ -53,6 +53,7 @@ from typing import Callable, Iterable
 
 from src.schemas.finding import Finding, Severity
 from src.tools.csv_reader import read_csv_robust
+from src.tools.profiling import get_semantic_lookup
 
 
 @dataclass(frozen=True)
@@ -73,6 +74,7 @@ class CheckSpec:
     agent_tool: bool = True
     fallback: bool = True
     tool_name: str | None = None
+    accepted_semantic: frozenset[str] = frozenset({"any"})
 
     @property
     def agent_tool_name(self) -> str:
@@ -125,6 +127,7 @@ def register_check(
     agent_tool: bool = True,
     fallback: bool = True,
     tool_name: str | None = None,
+    accepted_semantic: Iterable[str] = ("any",),
 ) -> Callable[[Callable[..., list[Finding]]], Callable[..., list[Finding]]]:
     """Register a check function under a stable name.
 
@@ -156,6 +159,7 @@ def register_check(
             agent_tool=agent_tool,
             fallback=fallback,
             tool_name=tool_name,
+            accepted_semantic=frozenset(accepted_semantic),
         )
         return fn
 
@@ -329,7 +333,42 @@ def run_check(
                     )
                 ]
 
-    return (run_fn or spec.run)(**kwargs)
+    # Semantic gating: a column is eligible only if its semantic type is
+    # accepted AND it is not ambiguous. When accepted_semantic is {"any"}
+    # the full df is passed unchanged (checks like duplicates and bias need
+    # every column). Otherwise the df is filtered to eligible columns plus
+    # the target column (kept so target-type gating still works), and one
+    # informational note names the skipped columns.
+    skip_note: Finding | None = None
+    if spec.accepted_semantic and "any" not in spec.accepted_semantic:
+        profile = state.get("profile")
+        lookup = get_semantic_lookup(profile) if isinstance(profile, dict) else {}
+        target_column = state.get("target_column")
+        eligible: list[str] = []
+        skipped: list[str] = []
+        for col in df.columns:
+            sem = lookup.get(col, {}) or {}
+            col_type = sem.get("type", "unknown")
+            ambiguous = sem.get("ambiguous", True)
+            if col == target_column:
+                # Always keep the target column for target-type gating.
+                eligible.append(col)
+            elif col_type in spec.accepted_semantic and not ambiguous:
+                eligible.append(col)
+            else:
+                skipped.append(col)
+        if skipped:
+            df = df[eligible]
+            skip_note = info_note(
+                spec.name,
+                f"Skipped {len(skipped)} column(s) not eligible for the "
+                f"{spec.name} check: {', '.join(skipped)}.",
+            )
+
+    findings = (run_fn or spec.run)(**kwargs)
+    if skip_note is not None:
+        findings = [skip_note] + findings
+    return findings
 
 
 __all__ = [
