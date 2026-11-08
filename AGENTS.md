@@ -51,6 +51,16 @@ Data Detective is a LangGraph agent that audits a CSV dataset (missing values, d
 - Add a simple test in `tests/` for each new check function.
 - Configuration and secrets go in `.env`, never in code.
 
+## 6a. Comment cleanup rules
+
+When cleaning up comments in any Python file:
+
+1. **Remove the Obvious.** Delete inline comments that simply restate what the code does (e.g., `# loop through columns`, `# read the file`). Code should speak for itself.
+2. **Keep the Important.** Retain comments only if they explain *why* something is done — complex logic, business rules, or architectural workarounds.
+3. **Simplify the Survivors.** Rewrite any comment you keep into a concise plain-English summary, 1–2 short sentences max. No jargon or long paragraphs.
+4. **Trim Docstrings.** Keep module- and function-level docstrings, but keep them strictly brief — 3–4 sentences max, plain English.
+5. **Zero Logic Changes.** Do not modify executable code, function signatures, variables, or imports. Touch only `#` comments and `"""` docstrings.
+
 ## 7. After every change or session
 
 Do not edit the brief yourself unless asked. Instead, end your reply with a short suggested update for:

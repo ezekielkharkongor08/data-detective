@@ -11,3 +11,5 @@ myenv
 
 # Secrets / local config (never commit .env)
 .env
+
+AGENTS.md

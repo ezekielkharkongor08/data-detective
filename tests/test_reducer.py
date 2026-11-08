@@ -4,20 +4,10 @@ The reducer is the safety net that stops a repeated finding from appearing
 twice when a check runs more than once (for example on a thread re-run).
 """
 
-from src.graph.reducers import (
-    finding_dedup_key,
-    merge_findings,
-    stable_evidence_key,
-)
+from src.graph.reducers import finding_dedup_key, merge_findings, stable_evidence_key
 
 
-def _finding(
-    check_name: str,
-    columns: list[str],
-    evidence: str,
-    severity: str = "medium",
-) -> dict:
-    """Build a serialized Finding-like dict for tests."""
+def _finding(check_name, columns, evidence, severity="medium"):
     return {
         "check_name": check_name,
         "severity": severity,
@@ -104,10 +94,7 @@ def test_merge_findings_keeps_first_occurrence_order():
 
 
 def test_merge_findings_is_idempotent():
-    findings = [
-        _finding("a", ["x"], "e1"),
-        _finding("b", ["y"], "e2"),
-    ]
+    findings = [_finding("a", ["x"], "e1"), _finding("b", ["y"], "e2")]
     once = merge_findings([], findings)
     twice = merge_findings(once, findings)
     assert twice == once
@@ -122,23 +109,3 @@ def test_merge_findings_handles_none():
 
 def test_merge_findings_accepts_empty_lists():
     assert merge_findings([], []) == []
-
-
-__all__ = [
-    "test_stable_evidence_key_ignores_surrounding_whitespace",
-    "test_stable_evidence_key_is_deterministic",
-    "test_stable_evidence_key_differs_for_different_text",
-    "test_stable_evidence_key_handles_none_and_empty",
-    "test_finding_dedup_key_is_column_order_insensitive",
-    "test_finding_dedup_key_differs_by_check_name",
-    "test_finding_dedup_key_differs_by_evidence",
-    "test_merge_findings_dedupes_exact_duplicates",
-    "test_merge_findings_dedupes_across_copies_with_whitespace",
-    "test_merge_findings_column_order_is_irrelevant",
-    "test_merge_findings_keeps_distinct_columns",
-    "test_merge_findings_keeps_distinct_evidence",
-    "test_merge_findings_keeps_first_occurrence_order",
-    "test_merge_findings_is_idempotent",
-    "test_merge_findings_handles_none",
-    "test_merge_findings_accepts_empty_lists",
-]

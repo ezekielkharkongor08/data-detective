@@ -137,8 +137,7 @@ Tick each box when done and update section 1.
 - [ ] **M4 — LLM with tools (ReAct) and structured output:** the agent chooses which checks to call and returns `Finding` objects
 - [ ] **M5 — Persistence and memory:** Postgres checkpointer, saved audit history, resume and replay a run
 - [ ] **M7 — Backend:** FastAPI endpoints (start audit, check status, get report), Postgres tables, Docker
-- [ ] **M8 — Evaluation and tracing:** planted-problem test sets, detection score, tracing dashboard
-- [ ] **M9 — Polish:** README, architecture diagram, CV bullets
+- [ ] **M8 — Polish:** README, CV bullets
 
 ## 10. Datasets
 
