@@ -24,10 +24,12 @@ from src.tools.checks import (
     error_finding,
     get_check,
     get_checks,
+    info_note,
     run_check,
 )
+from src.check_config import check_config
 from src.tools.csv_reader import read_csv_robust
-from src.tools.profiling import profile_dataset
+from src.tools.profiling import get_semantic_lookup, profile_dataset
 
 
 def load_csv_node(state: GraphState) -> GraphState:
@@ -128,31 +130,90 @@ def merge_findings_node(state: GraphState) -> GraphState:
     return {}
 
 
+def _eligible_suspect_columns(
+    csv_path: str,
+    profile: dict[str, Any],
+    target_column: str | None,
+    max_count: int,
+) -> tuple[list[str], int]:
+    """Return feature columns eligible for deep leakage detection.
+
+    Reads the CSV to compute nunique for high-uniqueness exclusion.
+    Excludes the target column, identifier/constant/text columns, and
+    high-uniqueness columns that leakage_check itself would skip.
+    Returns ``(capped_columns, total_eligible)`` where ``capped_columns``
+    holds at most ``max_count`` columns in profile order.
+    """
+    if not csv_path or not target_column or not profile:
+        return [], 0
+    lookup = get_semantic_lookup(profile)
+    columns = profile.get("columns") or []
+    n_rows = int(profile.get("n_rows", 0))
+    eligible: list[str] = []
+    try:
+        df = read_csv_robust(csv_path)
+    except Exception:
+        return [], 0
+    nunique_by_col = {
+        str(col.get("name")): int(df[col.get("name")].nunique(dropna=True))
+        for col in columns
+        if col.get("name") in df.columns
+    }
+    for col_info in columns:
+        col = str(col_info.get("name") or "")
+        if not col or col == target_column:
+            continue
+        sem = lookup.get(col) or {}
+        col_type = sem.get("type", "unknown")
+        if col_type in ("identifier", "constant", "text"):
+            continue
+        # High-uniqueness columns are skipped by leakage_check itself.
+        nunique = nunique_by_col.get(col)
+        if nunique is not None and n_rows >= 50:
+            if nunique / n_rows >= check_config.leakage.high_cardinality_ratio:
+                continue
+        eligible.append(col)
+    total_eligible = len(eligible)
+    capped = eligible[:max_count]
+    return capped, total_eligible
+
+
 def router_node(state: GraphState) -> GraphState:
     """Decide whether to run deep leakage checks.
 
-    Finds suspect columns in merged findings (id_like, or schema findings for
-    numeric-looking text) and sets ``leakage_suspected`` / ``suspect_columns``.
+    When a target column exists, every eligible feature column is treated
+    as a leakage suspect (excluded: target, identifier, constant, text,
+    high-uniqueness). ``leakage_suspected`` is True when at least one
+    eligible column exists. ``id_like`` and ``schema`` findings are no
+    longer triggers -- an identifier is not leakage.
     """
-    findings = state.get("findings") or []
+    csv_path = state.get("csv_path")
     target_column = state.get("target_column")
+    profile = state.get("profile") or {}
+    max_count = int(check_config.leakage.max_leakage_suspects)
 
-    suspect_columns: list[str] = []
-    for f in findings:
-        # ID-like columns are the most common leakage vector.
-        if f["check_name"] == "id_like":
-            for col in f["affected_columns"]:
-                if col != target_column and col not in suspect_columns:
-                    suspect_columns.append(col)
-        # A text column that is mostly numeric may be target encoded as text.
-        elif f["check_name"] == "schema":
-            for col in f["affected_columns"]:
-                if col != target_column and col not in suspect_columns:
-                    suspect_columns.append(col)
+    suspect_columns, total_eligible = _eligible_suspect_columns(
+        csv_path, profile, target_column, max_count
+    )
+    findings: list[dict[str, Any]] = []
+    if total_eligible > len(suspect_columns):
+        findings.append(
+            info_note(
+                "target_leakage",
+                (
+                    f"Capped deep-leakage check at {max_count} suspect "
+                    f"column(s); {total_eligible - len(suspect_columns)} "
+                    f"further eligible column(s) were not checked."
+                ),
+            )
+        )
 
+    # State field names kept for API compatibility with the agent path and
+    # the checkpointer.
     return {
         "leakage_suspected": len(suspect_columns) > 0,
         "suspect_columns": suspect_columns,
+        "findings": findings,
     }
 
 
@@ -166,16 +227,22 @@ def deep_checks_node(state: GraphState) -> GraphState:
     if not csv_path or not target_column:
         return {"deep_check_results": []}
 
-    # When leakage is suspected, test all non-target columns for leakage.
-    # The router's suspect_columns are recorded in state for reporting, but
-    # target_leakage scans every column so the actual leaking column is found.
-    suspicious_columns = None
+    # Deterministic path: router_node already set suspect_columns. Agent path:
+    # compute them here from the same rule so both paths agree.
+    suspect_columns = state.get("suspect_columns")
+    if suspect_columns is None:
+        csv_path = state.get("csv_path")
+        profile = state.get("profile") or {}
+        max_count = int(check_config.leakage.max_leakage_suspects)
+        suspect_columns, _ = _eligible_suspect_columns(
+            csv_path, profile, target_column, max_count
+        )
 
     spec = get_check("target_leakage")
     deep_state = dict(state)
     deep_state["check_params"] = {
         **(state.get("check_params") or {}),
-        "target_leakage": {"suspicious_columns": suspicious_columns},
+        "target_leakage": {"suspicious_columns": suspect_columns},
     }
     findings = run_check(spec, deep_state)
 

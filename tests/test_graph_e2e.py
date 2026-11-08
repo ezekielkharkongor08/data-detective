@@ -107,10 +107,14 @@ def test_e2e_missing_csv_still_renders_error_report():
     assert report_text is not None and "Error:" in report_text
 
 
-def test_e2e_clean_csv_skips_deep_leakage_check():
-    """A clean CSV with no id_like/schema findings skips deep_checks."""
+def test_e2e_clean_csv_runs_deep_leakage_check_no_findings():
+    """A clean CSV runs the deep leakage check but finds no leakage."""
     df = pd.DataFrame(
-        {"age": [25, 30, 25, 30], "city": ["NY", "LA", "NY", "LA"], "target": [0, 1, 0, 1]}
+        {
+            "feature_a": [1, 2, 3, 4, 5] * 12,
+            "feature_b": [10, 20, 30, 40, 50] * 12,
+            "target": [0, 1] * 30,
+        }
     )
     csv_path = _write_csv(df)
     graph = build_graph(checkpointer=MemorySaver())
@@ -119,7 +123,9 @@ def test_e2e_clean_csv_skips_deep_leakage_check():
         {"csv_path": csv_path, "target_column": "target"}, config=config
     )
     assert final_state.get("error") is None, final_state.get("error")
-    assert final_state.get("leakage_suspected") is False
+    # Eligible feature columns exist, so the deep check runs.
+    assert final_state.get("leakage_suspected") is True
+    assert set(final_state.get("suspect_columns") or []) == {"feature_a", "feature_b"}
     deep = final_state.get("deep_check_results") or []
     assert deep == []
     report = final_state.get("report")

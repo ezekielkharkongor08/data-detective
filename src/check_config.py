@@ -36,6 +36,7 @@ class LeakageConfig:
     high_r2: float = 0.90
     medium_r2: float = 0.70
     max_rows_for_cv: int = 100000   # sample above this before CV
+    max_leakage_suspects: int = 25  # max suspect columns for deep check
     cv_random_state: int = 42       # fixed seed so CV results are deterministic
 
 

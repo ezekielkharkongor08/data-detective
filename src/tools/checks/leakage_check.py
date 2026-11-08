@@ -190,6 +190,7 @@ def leakage_check(
         )
 
     findings: list[Finding] = []
+    skipped_suspects: list[tuple[str, str]] = []
 
     if is_continuous:
         if not pd.api.types.is_numeric_dtype(y):
@@ -208,12 +209,25 @@ def leakage_check(
 
             # Constant column: can't train.
             if series.nunique(dropna=True) < 2:
+                if suspicious_columns is not None and col in suspicious_columns:
+                    skipped_suspects.append(
+                        (col, "constant column, no variance")
+                    )
                 continue
 
             # High-cardinality column: skip on larger datasets (ID-like check
             # covers them). On small datasets the ratio is not meaningful.
             unique_ratio = series.nunique(dropna=True) / n_rows
             if n_rows >= 50 and unique_ratio >= check_config.leakage.high_cardinality_ratio:
+                if suspicious_columns is not None and col in suspicious_columns:
+                    skipped_suspects.append(
+                        (
+                            col,
+                            f"high-cardinality column (unique ratio "
+                            f"{unique_ratio:.2f} >= "
+                            f"{check_config.leakage.high_cardinality_ratio})",
+                        )
+                    )
                 continue
 
             try:
@@ -268,6 +282,22 @@ def leakage_check(
                 )
             )
 
+        if skipped_suspects:
+            names = _cap_suspect_names([c for c, _ in skipped_suspects])
+            findings.insert(
+                0,
+                Finding(
+                    check_name="target_leakage",
+                    severity=Severity.INFO,
+                    evidence=(
+                        f"Skipped {len(skipped_suspects)} requested suspect "
+                        f"column(s): {names}."
+                    ),
+                    affected_columns=[],
+                    confidence=1.0,
+                )
+            )
+
         return findings
 
     # --- Classification path: cross-validated ROC AUC ---
@@ -303,12 +333,25 @@ def leakage_check(
 
         # Constant column: can't train.
         if series.nunique(dropna=True) < 2:
+            if suspicious_columns is not None and col in suspicious_columns:
+                skipped_suspects.append(
+                    (col, "constant column, no variance")
+                )
             continue
 
         # High-cardinality column: skip on larger datasets (ID-like check
         # covers them). On small datasets the ratio is not meaningful.
         unique_ratio = series.nunique(dropna=True) / n_rows
         if n_rows >= 50 and unique_ratio >= check_config.leakage.high_cardinality_ratio:
+            if suspicious_columns is not None and col in suspicious_columns:
+                skipped_suspects.append(
+                    (
+                        col,
+                        f"high-cardinality column (unique ratio "
+                        f"{unique_ratio:.2f} >= "
+                        f"{check_config.leakage.high_cardinality_ratio})",
+                    )
+                )
             continue
 
         try:
@@ -368,7 +411,30 @@ def leakage_check(
             )
         )
 
+    if skipped_suspects:
+        names = _cap_suspect_names([c for c, _ in skipped_suspects])
+        findings.insert(
+            0,
+            Finding(
+                check_name="target_leakage",
+                severity=Severity.INFO,
+                evidence=(
+                    f"Skipped {len(skipped_suspects)} requested suspect "
+                    f"column(s): {names}."
+                ),
+                affected_columns=[],
+                confidence=1.0,
+            )
+        )
+
     return findings
+
+
+def _cap_suspect_names(cols: list[str], limit: int = 6) -> str:
+    """Cap a suspect-column list with ``and N more`` when it exceeds the limit."""
+    if len(cols) <= limit:
+        return ", ".join(f"'{c}'" for c in cols)
+    return f"{', '.join(f"'{c}'" for c in cols[:limit])} and {len(cols) - limit} more"
 
 
 __all__ = ["leakage_check"]

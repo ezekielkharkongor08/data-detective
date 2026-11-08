@@ -29,6 +29,7 @@ from src.tools.checks.registry import (
 )
 from src.tools.profiling import profile_dataset
 from src.tools.target_type import is_classification_target
+from src.graph.nodes import router_node, deep_checks_node
 
 # ── shared dirty dataset ────────────────────────────────────────────────
 
@@ -652,3 +653,248 @@ def test_no_note_when_no_degenerate_column():
     df = _target_frame("target", [0, 1] * 50, n)
     res = _run_checks_on(df, "target")
     assert _notes(res, "outliers") == [], res
+
+
+# ── router / deep-check consistency (Step 4) ──────────────────────────
+
+
+def _router_state(csv_path, profile, target_column, findings=None):
+    return {
+        "csv_path": csv_path,
+        "target_column": target_column,
+        "profile": profile,
+        "findings": findings or [],
+    }
+
+
+def test_router_id_like_only_not_suspected():
+    """id_like findings do not make the router suspicious."""
+    df = pd.DataFrame(
+        {
+            "target": [0, 1] * 50,
+            "row_id": [f"id-{i}" for i in range(100)],
+            "amount": [float(i) for i in range(100)],
+        }
+    )
+    path = os.path.join(tempfile.mkdtemp(), "router.csv")
+    df.to_csv(path, index=False)
+    profile = profile_dataset(path, target_column="target")
+    state = _router_state(path, profile, "target", [
+        {"check_name": "id_like", "affected_columns": ["row_id"]}
+    ])
+    result = router_node(state)
+    assert result["leakage_suspected"] is False
+    assert "row_id" not in result["suspect_columns"]
+
+
+def test_router_schema_finding_is_suspected():
+    """schema findings make the router suspicious."""
+    df = pd.DataFrame(
+        {
+            "target": [0, 1] * 50,
+            "amount": ["1", "2", "3", "4"] * 25,
+            "note": ["text"] * 100,
+        }
+    )
+    path = os.path.join(tempfile.mkdtemp(), "router.csv")
+    df.to_csv(path, index=False)
+    profile = profile_dataset(path, target_column="target")
+    state = _router_state(path, profile, "target", [
+        {"check_name": "schema", "affected_columns": ["amount"]}
+    ])
+    result = router_node(state)
+    assert result["leakage_suspected"] is True
+    assert "amount" in result["suspect_columns"]
+
+
+def test_router_no_target_not_suspected():
+    """No target column → not suspected."""
+    df = pd.DataFrame({"amount": [float(i) for i in range(100)]})
+    path = os.path.join(tempfile.mkdtemp(), "router.csv")
+    df.to_csv(path, index=False)
+    profile = profile_dataset(path)
+    state = _router_state(path, profile, None)
+    result = router_node(state)
+    assert result["leakage_suspected"] is False
+    assert result["suspect_columns"] == []
+
+
+def test_router_caps_suspect_columns():
+    """More eligible columns than the cap → capped list."""
+    import src.graph.nodes as nodes_mod
+
+    n = 60
+    df = pd.DataFrame(
+        {
+            "target": [0, 1] * (n // 2),
+            "f1": [1.0, 2.0, 3.0, 4.0, 5.0] * (n // 5),
+            "f2": [10.0, 20.0, 30.0, 40.0, 50.0] * (n // 5),
+            "f3": [100.0, 200.0, 300.0, 400.0, 500.0] * (n // 5),
+        }
+    )
+    path = os.path.join(tempfile.mkdtemp(), "router.csv")
+    df.to_csv(path, index=False)
+    profile = profile_dataset(path, target_column="target")
+    capped, total = nodes_mod._eligible_suspect_columns(path, profile, "target", 2)
+    assert len(capped) == 2
+    assert total == 3  # f1, f2, f3 all eligible
+
+
+def test_router_cap_emits_info_note(monkeypatch):
+    """Router emits an INFO note when capping suspect columns."""
+    import src.graph.nodes as nodes_mod
+
+    original = nodes_mod._eligible_suspect_columns
+
+    def wrapped(csv_path, profile, target_column, max_count):
+        cols, total = original(csv_path, profile, target_column, max_count)
+        return cols[:1], total  # pretend cap is 1
+
+    monkeypatch.setattr(nodes_mod, "_eligible_suspect_columns", wrapped)
+
+    df = pd.DataFrame(
+        {
+            "target": [0, 1] * 25,
+            "f1": [1.0, 2.0, 3.0, 4.0, 5.0] * 10,
+            "f2": [10.0, 20.0, 30.0, 40.0, 50.0] * 10,
+        }
+    )
+    path = os.path.join(tempfile.mkdtemp(), "router.csv")
+    df.to_csv(path, index=False)
+    profile = profile_dataset(path, target_column="target")
+    state = _router_state(path, profile, "target")
+    result = router_node(state)
+    assert result["leakage_suspected"] is True
+    assert len(result["suspect_columns"]) == 1
+    notes = [f for f in result.get("findings", []) if f.check_name == "target_leakage"]
+    assert any("capped" in f.evidence.lower() for f in notes), result.get(
+        "findings"
+    )
+
+
+# ── deep_checks_node passes suspects through ─────────────────────────
+
+
+def test_deep_checks_passes_suspects_through(monkeypatch):
+    """deep_checks_node forwards suspect_columns as suspicious_columns."""
+    import src.graph.nodes as nodes_mod
+
+    captured = {}
+
+    def spy_run_check(spec, state, run_fn=None):
+        captured["suspicious_columns"] = state.get("check_params", {}).get(
+            "target_leakage", {}
+        ).get("suspicious_columns")
+        return [
+            Finding(
+                check_name="target_leakage",
+                severity=Severity.INFO,
+                evidence="spy",
+                affected_columns=[],
+                confidence=1.0,
+            )
+        ]
+
+    monkeypatch.setattr(nodes_mod, "run_check", spy_run_check)
+
+    df = pd.DataFrame(
+        {
+            "target": [0, 1] * 50,
+            "leak": [0, 1] * 50,
+            "amount": [float(i) for i in range(100)],
+        }
+    )
+    path = os.path.join(tempfile.mkdtemp(), "deep.csv")
+    df.to_csv(path, index=False)
+    profile = profile_dataset(path, target_column="target")
+    state = {
+        "csv_path": path,
+        "target_column": "target",
+        "profile": profile,
+        "suspect_columns": ["leak", "amount"],
+        "check_params": {},
+    }
+    result = nodes_mod.deep_checks_node(state)
+    assert captured["suspicious_columns"] == ["leak", "amount"]
+
+
+def test_deep_checks_skipped_suspect_note():
+    """A skipped suspect produces a grouped INFO note."""
+    df = pd.DataFrame(
+        {
+            "target": [0, 1] * 50,
+            "constant": [7.0] * 100,
+        }
+    )
+    path = os.path.join(tempfile.mkdtemp(), "deep.csv")
+    df.to_csv(path, index=False)
+    profile = profile_dataset(path, target_column="target")
+    state = {
+        "csv_path": path,
+        "target_column": "target",
+        "profile": profile,
+        "suspect_columns": ["constant"],
+        "check_params": {},
+    }
+    result = deep_checks_node(state)
+    notes = [f for f in result["findings"] if f.get("check_name") == "target_leakage"]
+    assert any("constant" in f.get("evidence", "") for f in notes), result[
+        "findings"
+    ]
+
+
+# ── leaky feature detected in both paths ─────────────────────────────
+
+
+def test_leaky_feature_detected_deterministic():
+    """A feature that is a copy of the target is detected (deterministic)."""
+    df = pd.DataFrame(
+        {
+            "target": [0, 1] * 50,
+            "leak": [0, 1] * 50,
+            "amount": [float(i) for i in range(100)],
+        }
+    )
+    path = os.path.join(tempfile.mkdtemp(), "leak.csv")
+    df.to_csv(path, index=False)
+    profile = profile_dataset(path, target_column="target")
+    state = _router_state(path, profile, "target")
+    result = router_node(state)
+    assert result["leakage_suspected"] is True
+    assert "leak" in result["suspect_columns"]
+
+    deep_state = {
+        "csv_path": path,
+        "target_column": "target",
+        "profile": profile,
+        "suspect_columns": result["suspect_columns"],
+        "check_params": {},
+    }
+    deep_result = deep_checks_node(deep_state)
+    leak_findings = [
+        f
+        for f in deep_result["findings"]
+        if f.get("check_name") == "target_leakage"
+        and f.get("severity") != "INFO"
+    ]
+    assert any("leak" in str(f.get("affected_columns")) for f in leak_findings), deep_result[
+        "findings"
+    ]
+
+
+def test_boolean_target_behaves_like_binary():
+    """Boolean target: only the target is excluded, features analyzed."""
+    df = pd.DataFrame(
+        {
+            "target": [True, False] * 50,
+            "skewed_feat": [1.0] * 90 + list(range(2, 12)),
+            "outlier_feat": list(range(1, 86)) + [1000.0] * 10 + [-1000.0] * 5,
+            "normal_feat": [float(i) for i in range(100)],
+        }
+    )
+    res = _run_checks_on(df, "target")
+    assert "target" not in _cols(res, "skewness"), res
+    assert "target" not in _cols(res, "outliers"), res
+    assert "skewed_feat" in _cols(res, "skewness"), res
+    assert "outlier_feat" in _cols(res, "outliers"), res
+
