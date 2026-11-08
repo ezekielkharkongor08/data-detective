@@ -15,7 +15,7 @@ import pandas as pd
 from src.check_config import check_config
 from src.schemas.finding import Finding, Severity
 from src.tools.checks.registry import register_check
-from src.tools.target_type import detect_target_type
+from src.tools.target_type import is_classification_target
 
 
 @register_check(
@@ -35,14 +35,15 @@ def skewness_check(df: pd.DataFrame, target_column: Optional[str] = None) -> lis
     """
     findings: list[Finding] = []
 
-    # Skip for classification targets — redundant with the class_imbalance
-    # check; skewness only matters for regression targets.
+    # Class labels (binary, boolean, multiclass) have no meaningful skew,
+    # so only the target column itself is excluded; eligible feature
+    # columns are still analyzed. Continuous targets are analyzed like any
+    # other column.
+    target_is_classification = False
     if target_column and target_column in df.columns:
-        target = df[target_column].dropna()
-        if len(target) > 0:
-            target_type = detect_target_type(target)
-            if target_type in ("binary", "multiclass"):
-                return []
+        target_series = df[target_column].dropna()
+        if len(target_series) > 0:
+            target_is_classification = is_classification_target(target_series)
 
     for col in df.columns:
         series = df[col]
@@ -50,6 +51,8 @@ def skewness_check(df: pd.DataFrame, target_column: Optional[str] = None) -> lis
         # Type guard for direct callers; the registry gates this check to
         # numeric semantics normally.
         if not pd.api.types.is_numeric_dtype(series):
+            continue
+        if col == target_column and target_is_classification:
             continue
 
         clean = series.dropna()

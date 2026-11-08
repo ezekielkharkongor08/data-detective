@@ -51,11 +51,14 @@ def _field_type(spec: CheckSpec, key: str) -> type:
     return typ if key in spec.required else Optional[typ]
 
 
-def _args_schema(spec: CheckSpec) -> type:
+def _args_schema(spec: CheckSpec, bind_io: bool = False) -> type:
     """Build a pydantic model describing the tool's arguments.
 
     Every check receives ``csv_path`` and ``target_column``; target-required
-    checks require the target, the rest accept it as an optional hint.
+    checks require the target, the rest accept it as an optional hint. When
+    ``bind_io`` is true the agent injects ``csv_path``/``target_column``/
+    ``profile`` from state, so they are removed from the LLM-visible schema
+    and the model may only supply optional check parameters.
     """
     required_keys = list(spec.required)
     if "csv_path" not in required_keys:
@@ -64,6 +67,10 @@ def _args_schema(spec: CheckSpec) -> type:
     optional_keys = list(spec.optional)
     if "target_column" not in required_keys and "target_column" not in optional_keys:
         optional_keys.insert(0, "target_column")
+
+    if bind_io:
+        required_keys = [key for key in required_keys if key not in ("csv_path", "target_column")]
+        optional_keys = [key for key in optional_keys if key not in ("csv_path", "target_column")]
 
     fields: dict[str, tuple[type, Any]] = {}
 
@@ -81,16 +88,37 @@ def _args_schema(spec: CheckSpec) -> type:
     return create_model(f"{spec.name.title().replace('_', '')}Args", **fields)
 
 
-def _make_runner(spec: CheckSpec):
-    """Create the function behind one generated tool."""
+def _make_runner(
+    spec: CheckSpec,
+    *,
+    csv_path: str | None = None,
+    target_column: str | None = None,
+    profile: dict[str, Any] | None = None,
+):
+    """Create the function behind one generated tool.
+
+    ``csv_path``/``target_column``/``profile`` may be injected from agent
+    state; injected values win over LLM-supplied arguments so the model can
+    only choose which tool to call and supply optional check parameters.
+    When nothing is injected, arguments fall back to the LLM-supplied values
+    (kept for direct tool use and backwards compatibility).
+    """
 
     def _run(**kwargs: Any) -> str:
         # Build the same minimal state the registry expects, so tools and the
         # graph share one contract (required inputs, params, target gating).
         state: dict[str, Any] = {
-            "csv_path": kwargs.get("csv_path"),
-            "target_column": kwargs.get("target_column"),
+            "csv_path": (
+                csv_path if csv_path is not None else kwargs.get("csv_path")
+            ),
+            "target_column": (
+                target_column
+                if target_column is not None
+                else kwargs.get("target_column")
+            ),
         }
+        if profile is not None:
+            state["profile"] = profile
         for key in spec.required:
             if key not in state:
                 state[key] = kwargs.get(key)
@@ -111,17 +139,35 @@ def _make_runner(spec: CheckSpec):
     return _run
 
 
-def _make_tool(spec: CheckSpec) -> StructuredTool:
-    """Build one LangChain tool from a registered check."""
+def _make_tool(
+    spec: CheckSpec,
+    *,
+    csv_path: str | None = None,
+    target_column: str | None = None,
+    profile: dict[str, Any] | None = None,
+) -> StructuredTool:
+    """Build one LangChain tool from a registered check.
+
+    When ``csv_path``/``target_column``/``profile`` are injected they are
+    bound into the runner and removed from the LLM-visible schema (``bind_io``
+    true); otherwise the LLM supplies them via arguments (used by ``ALL_TOOLS``
+    and direct tool calls).
+    """
+    bind_io = csv_path is not None or target_column is not None or profile is not None
     description = spec.description or f"Run the {spec.name} check."
     return StructuredTool.from_function(
-        func=_make_runner(spec),
+        func=_make_runner(
+            spec,
+            csv_path=csv_path,
+            target_column=target_column,
+            profile=profile,
+        ),
         name=spec.agent_tool_name,
         description=(
             f"{description} Returns findings as JSON "
             "(an empty list means clean)."
         ),
-        args_schema=_args_schema(spec),
+        args_schema=_args_schema(spec, bind_io=bind_io),
     )
 
 

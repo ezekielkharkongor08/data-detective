@@ -4,6 +4,9 @@ Every check now accepts ``df: pd.DataFrame`` directly (the CSV is loaded
 centrally by ``run_check`` / the graph, not by each check).
 """
 
+import os
+import tempfile
+
 import pandas as pd
 import pytest
 
@@ -18,6 +21,14 @@ from src.tools.checks.missing_check import missing_check
 from src.tools.checks.outlier_check import outlier_check
 from src.tools.checks.schema_check import schema_check
 from src.tools.checks.skewness_check import skewness_check
+from src.tools.checks.registry import (
+    get_check,
+    run_check,
+    _skip_note_message,
+    _cap_names,
+)
+from src.tools.profiling import profile_dataset
+from src.tools.target_type import is_classification_target
 
 # ── shared dirty dataset ────────────────────────────────────────────────
 
@@ -401,3 +412,243 @@ def test_finding_sorting_highest_first():
         Severity.MEDIUM,
         Severity.LOW,
     ]
+
+
+# ── semantic gating / skip note ──────────────────────────────────────────
+
+
+def _gating_csv(df, name="gating.csv"):
+    path = os.path.join(tempfile.mkdtemp(), name)
+    df.to_csv(path, index=False)
+    return path
+
+
+def _gating_state(csv_path, profile, target_column="target"):
+    return {
+        "csv_path": csv_path,
+        "target_column": target_column,
+        "profile": profile,
+        "check_params": {},
+    }
+
+
+def _run_skewness(csv_path, profile, target_column="target"):
+    spec = get_check("skewness")
+    return run_check(spec, _gating_state(csv_path, profile, target_column))
+
+
+def _skip_note(findings):
+    for f in findings:
+        if f.evidence.startswith("Skipped") or f.evidence.startswith(
+            "Semantic profile unavailable"
+        ):
+            return f.evidence
+    return None
+
+
+def test_skip_note_lists_only_excluded_columns_grouped_by_reason():
+    df = pd.DataFrame(
+        {
+            "target": [0, 1] * 50,
+            "amount": [float(i) for i in range(100)],  # numeric, eligible
+            "note": ["free text entry " + str(i) for i in range(100)],  # text
+        }
+    )
+    csv_path = _gating_csv(df)
+    profile = profile_dataset(csv_path, target_column="target")
+    findings = _run_skewness(csv_path, profile)
+    note = _skip_note(findings)
+    assert note is not None
+    assert "target" not in note
+    assert "amount" not in note
+    assert "note" in note
+    assert "wrong type" in note
+
+
+def test_skip_note_absent_when_all_eligible():
+    df = pd.DataFrame(
+        {
+            "target": [0, 1] * 50,
+            "amount": [float(i) for i in range(100)],
+            "score": [float(i * 0.5) for i in range(100)],
+        }
+    )
+    csv_path = _gating_csv(df)
+    profile = profile_dataset(csv_path, target_column="target")
+    findings = _run_skewness(csv_path, profile)
+    assert _skip_note(findings) is None
+
+
+def test_skip_note_all_non_target_excluded():
+    df = pd.DataFrame(
+        {
+            "target": [0, 1] * 50,
+            "note1": ["text " + str(i) for i in range(100)],
+            "note2": ["more text " + str(i) for i in range(100)],
+        }
+    )
+    csv_path = _gating_csv(df)
+    profile = profile_dataset(csv_path, target_column="target")
+    findings = _run_skewness(csv_path, profile)
+    note = _skip_note(findings)
+    assert note is not None
+    assert "target" not in note
+    assert "note1" in note
+    assert "note2" in note
+
+
+def test_skip_note_empty_lookup_runs_ungated():
+    df = pd.DataFrame(
+        {
+            "target": [0, 1] * 50,
+            "amount": [float(i) for i in range(100)],
+        }
+    )
+    csv_path = _gating_csv(df)
+    state = _gating_state(csv_path, {}, target_column="target")
+    spec = get_check("skewness")
+    findings = run_check(spec, state)
+    note = _skip_note(findings)
+    assert note is not None
+    assert "Semantic profile unavailable" in note
+
+
+def test_skip_note_message_groups_by_reason():
+    msg = _skip_note_message("skewness", ["date", "street"], ["view", "condition"])
+    assert "wrong type: date, street" in msg
+    assert "ambiguous type: view, condition" in msg
+    assert "Skipped 4 column(s) not eligible for the skewness check" in msg
+
+
+def test_cap_names_short_list():
+    assert _cap_names(["a", "b"]) == "a, b"
+
+
+def test_cap_names_long_list_capped():
+    assert (
+        _cap_names(["a", "b", "c", "d", "e", "f", "g", "h"], limit=6)
+        == "a, b, c, d, e, f and 2 more"
+    )
+
+
+# ── target handling & degenerate IQR (Step 5b + Step 3) ─────────────────
+
+
+def _target_frame(target_col, target_values, n=None):
+    if n is None:
+        n = len(target_values)
+    return pd.DataFrame({
+        target_col: list(target_values)[:n],
+        "skewed_feat": ([1.0, 2.0, 3.0, 4.0] * ((n - 1) // 4 + 1))[:n - 1] + [100.0],
+        "outlier_feat": list(range(1, n - 14)) + [1000.0] * 10 + [-1000.0] * 5,
+        "normal_feat": [float(i) for i in range(n)],
+    })
+
+
+def _run_checks_on(df, target_column):
+    path = os.path.join(tempfile.mkdtemp(), "target_frame.csv")
+    df.to_csv(path, index=False)
+    profile = profile_dataset(path, target_column=target_column)
+    state = {
+        "csv_path": path,
+        "target_column": target_column,
+        "profile": profile,
+        "check_params": {},
+    }
+    out = {}
+    for cn in ("skewness", "outliers"):
+        spec = get_check(cn)
+        findings = run_check(spec, state)
+        out[cn] = [
+            (f.affected_columns[0] if f.affected_columns else "(none)",
+             f.severity.value,
+             f.evidence)
+            for f in findings
+        ]
+    return out
+
+
+def _cols(findings_by_check, check_name):
+    return {col for col, sev, _ in findings_by_check.get(check_name, []) if sev != "info"}
+
+
+def _notes(findings_by_check, check_name):
+    return [ev for col, sev, ev in findings_by_check.get(check_name, []) if sev == "info"]
+
+
+def test_is_classification_target():
+    assert is_classification_target(pd.Series([0, 1, 0, 1])) is True
+    assert is_classification_target(pd.Series([True, False, True])) is True
+    assert is_classification_target(pd.Series(["a", "b", "c"] * 10)) is True
+    assert is_classification_target(pd.Series([1.0, 2.0, 3.0, 4.0, 5.0])) is False
+    assert is_classification_target(pd.Series([1, 1, 1])) is False
+
+
+def test_skewness_outliers_exclude_only_classification_target():
+    """Binary/boolean/multiclass targets: only the target column is excluded;
+    eligible feature columns are still analyzed."""
+    n = 100
+    for target_values in ([0, 1] * 50, [True, False] * 50, [0, 1, 2, 3] * 25):
+        df = _target_frame("target", target_values, n)
+        res = _run_checks_on(df, "target")
+        assert "target" not in _cols(res, "skewness"), res
+        assert "target" not in _cols(res, "outliers"), res
+        assert "skewed_feat" in _cols(res, "skewness"), res
+        assert "outlier_feat" in _cols(res, "outliers"), res
+        assert "normal_feat" not in _cols(res, "skewness"), res
+        assert "normal_feat" not in _cols(res, "outliers"), res
+
+
+def test_skewness_outliers_continuous_target_analyzed():
+    n = 100
+    df = _target_frame("target", [float(i) for i in range(n)], n)
+    res = _run_checks_on(df, "target")
+    # Continuous target is analyzed (uniform here -> no finding); features still analyzed.
+    assert "target" not in _cols(res, "skewness"), res
+    assert "target" not in _cols(res, "outliers"), res
+    assert "skewed_feat" in _cols(res, "skewness"), res
+    assert "outlier_feat" in _cols(res, "outliers"), res
+
+
+def test_skewness_finding_on_skewed_continuous_target():
+    n = 100
+    target = [1.0] * 80 + [float(i) for i in range(100, 120)]  # skewed, continuous
+    df = _target_frame("target", target, n)
+    res = _run_checks_on(df, "target")
+    target_sev = [sev for col, sev, _ in res["skewness"] if col == "target"]
+    assert target_sev, res
+
+
+def test_outlier_finding_on_continuous_target_with_hint():
+    n = 100
+    target = [float(i) for i in range(85)] + [1000.0] * 10 + [-1000.0] * 5
+    df = _target_frame("target", target, n)
+    res = _run_checks_on(df, "target")
+    target_findings = [(col, sev, ev) for col, sev, ev in res["outliers"] if col == "target"]
+    assert len(target_findings) == 1, res
+    assert target_findings[0][1] == "high", res
+    hint = ("This is the target column: review these rows before removing them; "
+            "consider a log transform or a robust loss.")
+    assert hint in target_findings[0][2], target_findings[0][2]
+
+
+def test_zero_iqr_column_skipped_with_note():
+    n = 100
+    df = pd.DataFrame({
+        "target": [0, 1] * 50,
+        "zero_heavy": [0.0] * 95 + [1.0, 2.0, 3.0, 4.0, 5.0],
+        "normal_outlier": list(range(1, 86)) + [1000.0] * 10 + [-1000.0] * 5,
+    })
+    res = _run_checks_on(df, "target")
+    assert "zero_heavy" not in _cols(res, "outliers"), res
+    assert "normal_outlier" in _cols(res, "outliers"), res
+    notes = _notes(res, "outliers")
+    assert any("too few distinct values for IQR outlier detection" in note for note in notes), notes
+    assert any("zero_heavy" in note for note in notes), notes
+
+
+def test_no_note_when_no_degenerate_column():
+    n = 100
+    df = _target_frame("target", [0, 1] * 50, n)
+    res = _run_checks_on(df, "target")
+    assert _notes(res, "outliers") == [], res

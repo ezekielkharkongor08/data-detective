@@ -283,37 +283,78 @@ def run_check(
     # the full df is passed unchanged (checks like duplicates and bias need
     # every column). Otherwise the df is filtered to eligible columns plus
     # the target column (kept so target-type gating still works), and one
-    # informational note names the skipped columns.
+    # informational note names the skipped columns, grouped by reason.
     skip_note: Finding | None = None
     if spec.accepted_semantic and "any" not in spec.accepted_semantic:
         profile = state.get("profile")
         lookup = get_semantic_lookup(profile) if isinstance(profile, dict) else {}
         target_column = state.get("target_column")
-        eligible: list[str] = []
-        skipped: list[str] = []
-        for col in df.columns:
-            sem = lookup.get(col, {}) or {}
-            col_type = sem.get("type", "unknown")
-            ambiguous = sem.get("ambiguous", True)
-            if col == target_column:
-                # Always keep the target column for target-type gating.
-                eligible.append(col)
-            elif col_type in spec.accepted_semantic and not ambiguous:
-                eligible.append(col)
-            else:
-                skipped.append(col)
-        if skipped:
-            df = df[eligible]
+
+        if not lookup:
+            # No semantic profile available: do not silently drop every
+            # column. Run the check ungated and say so in one INFO note.
             skip_note = info_note(
                 spec.name,
-                f"Skipped {len(skipped)} column(s) not eligible for the "
-                f"{spec.name} check: {', '.join(skipped)}.",
+                f"Semantic profile unavailable for the {spec.name} check; "
+                f"running ungated on all columns.",
             )
+        else:
+            eligible: list[str] = []
+            wrong_type: list[str] = []
+            ambiguous_type: list[str] = []
+            for col in df.columns:
+                sem = lookup.get(col, {}) or {}
+                col_type = sem.get("type", "unknown")
+                ambiguous = sem.get("ambiguous", True)
+                if col == target_column:
+                    # Always keep the target column for target-type gating.
+                    eligible.append(col)
+                elif ambiguous:
+                    ambiguous_type.append(col)
+                elif col_type not in spec.accepted_semantic:
+                    wrong_type.append(col)
+                else:
+                    eligible.append(col)
+            skipped = wrong_type + ambiguous_type
+            if skipped:
+                df = df[eligible]
+                kwargs["df"] = df
+                skip_note = info_note(
+                    spec.name,
+                    _skip_note_message(spec.name, wrong_type, ambiguous_type),
+                )
 
     findings = (run_fn or spec.run)(**kwargs)
     if skip_note is not None:
         findings = [skip_note] + findings
     return findings
+
+
+def _skip_note_message(
+    spec_name: str, wrong_type: list[str], ambiguous_type: list[str]
+) -> str:
+    """Build the informational skip note grouping excluded columns by reason.
+
+    Column names are capped with ``and N more`` so the note stays short.
+    """
+    parts: list[str] = []
+    if wrong_type:
+        parts.append(f"wrong type: {_cap_names(wrong_type)}")
+    if ambiguous_type:
+        parts.append(f"ambiguous type: {_cap_names(ambiguous_type)}")
+    total = len(wrong_type) + len(ambiguous_type)
+    return (
+        f"Skipped {total} column(s) not eligible for the {spec_name} check: "
+        + "; ".join(parts)
+        + "."
+    )
+
+
+def _cap_names(cols: list[str], limit: int = 6) -> str:
+    """Cap a column list with ``and N more`` when it exceeds the limit."""
+    if len(cols) <= limit:
+        return ", ".join(cols)
+    return f"{', '.join(cols[:limit])} and {len(cols) - limit} more"
 
 
 __all__ = [

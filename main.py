@@ -8,6 +8,7 @@ Examples:
     python main.py --list
     python main.py data/raw/adult.csv --target income --thread-id run-001
     python main.py data/raw/adult.csv --target income --sensitive <column_name> --favorable <val>
+    python main.py --workbench visualize --run-id <uuid>
 
 The graph runs to completion in a single invoke; there is no human-in-the-loop
 pause. LLM settings come from `.env`.
@@ -22,6 +23,11 @@ import uuid
 from contextlib import contextmanager
 
 from langgraph.checkpoint.postgres import PostgresSaver
+
+try:
+    from langgraph.checkpoint.sqlite import SqliteSaver
+except ImportError:  # pragma: no cover - only when the sqlite dep is missing
+    SqliteSaver = None  # type: ignore[assignment]
 
 from src.config import get_settings
 from src.db.repository import ensure_schema, get_run, list_runs, save_run
@@ -80,14 +86,20 @@ def _parse_args() -> argparse.Namespace:
         help="Thread ID for this audit run (auto-generated if omitted).",
     )
     parser.add_argument(
+        "--workbench",
+        choices=["visualize"],
+        default=None,
+        help="Run a Phase 2 workbench tool against a past audit run.",
+    )
+    parser.add_argument(
         "--visualize",
         action="store_true",
-        help="Generate visualizations from a past audit run (requires --run-id).",
+        help="Deprecated alias for --workbench visualize (requires --run-id).",
     )
     parser.add_argument(
         "--run-id",
         default=None,
-        help="Run ID of a past audit to visualize (use with --visualize).",
+        help="Run ID of a past audit run (required with --workbench).",
     )
     return parser.parse_args()
 
@@ -154,19 +166,70 @@ def _build_semantic_overrides(args: argparse.Namespace) -> dict[str, str]:
 
 @contextmanager
 def _persisted_graph(use_agent: bool):
-    """Create a PostgresSaver, set up its tables, and build a graph with it.
+    """Create the backend checkpointer, set up its tables, and build a graph.
 
-    Yields the compiled graph. The saver is closed when the context exits.
+    Postgres -> ``PostgresSaver`` (existing behavior). SQLite -> ``SqliteSaver``.
+    Prints one line at startup naming the backend. A Postgres connection failure
+    is surfaced as a clear error asking to unset ``DATABASE_URL``; it never
+    silently falls back to SQLite.
     """
     settings = get_settings()
-    with PostgresSaver.from_conn_string(settings.postgres_conn_string) as saver:
-        saver.setup()  # safe to call repeatedly: only creates missing tables
-        graph = (
-            build_agent_graph(checkpointer=saver)
+    print(f"Using {settings.backend_name} backend.")
+
+    def _build(checkpointer):
+        return (
+            build_agent_graph(checkpointer=checkpointer)
             if use_agent
-            else build_graph(checkpointer=saver)
+            else build_graph(checkpointer=checkpointer)
         )
-        yield graph
+
+    if settings.is_postgres:
+        try:
+            with PostgresSaver.from_conn_string(settings.postgres_conn_string) as saver:
+                saver.setup()  # safe to call repeatedly: only creates missing tables
+                yield _build(saver)
+        except Exception as exc:  # noqa: BLE001 - surface a clear, actionable error
+            print(
+                "Error: could not connect to PostgreSQL using DATABASE_URL.\n"
+                "Unset DATABASE_URL (or set DATABASE_PATH) to use the local "
+                "SQLite backend instead."
+            )
+            raise
+    else:
+        if SqliteSaver is None:
+            raise RuntimeError(
+                "SQLite backend selected but langgraph-checkpoint-sqlite is not "
+                "installed. Install it or set DATABASE_URL to use PostgreSQL."
+            )
+        with SqliteSaver.from_conn_string(settings.database_path) as saver:
+            saver.setup()
+            yield _build(saver)
+
+
+def _run_visualizer_workbench(run: dict) -> None:
+    """Generate charts for an existing audit run."""
+    report_json = run.get("report_json") or {}
+    findings_in = report_json.get("findings") or []
+    csv_path = run.get("csv_path")
+    target_column = run.get("target_column")
+
+    graph = build_visualizer_graph()
+    state = graph.invoke(
+        {
+            "findings_in": findings_in,
+            "csv_path": csv_path,
+            "target_column": target_column,
+            "want_plots": True,
+        }
+    )
+
+    plot_paths = state.get("plot_paths") or []
+    if plot_paths:
+        print("Visualizer Workbench complete. Plots saved:")
+        for p in plot_paths:
+            print(f"  {p}")
+    else:
+        print("Visualizer Workbench complete. No plots were generated.")
 
 
 def main() -> None:
@@ -175,6 +238,10 @@ def main() -> None:
         sys.stdout.reconfigure(encoding="utf-8")
 
     args = _parse_args()
+
+    # Keep the old `--visualize` flag working while standardizing on --workbench.
+    if args.visualize and not args.workbench:
+        args.workbench = "visualize"
 
     ensure_schema()
 
@@ -193,36 +260,18 @@ def main() -> None:
             )
         return
 
-    if args.visualize:
+    if args.workbench:
         if not args.run_id:
-            print("Error: --run-id is required with --visualize.")
+            print(f"Error: --run-id is required with --workbench {args.workbench}.")
             return
+
         run = get_run(args.run_id)
         if not run:
             print(f"Error: no audit run found for run-id {args.run_id}.")
             return
-        report_json = run.get("report_json") or {}
-        findings_in = report_json.get("findings") or []
-        csv_path = run.get("csv_path")
-        target_column = run.get("target_column")
 
-        graph = build_visualizer_graph()
-        state = graph.invoke(
-            {
-                "findings_in": findings_in,
-                "csv_path": csv_path,
-                "target_column": target_column,
-                "want_plots": True,
-            }
-        )
-
-        plot_paths = state.get("plot_paths") or []
-        if plot_paths:
-            print("Visualizer Workbench complete. Plots saved:")
-            for p in plot_paths:
-                print(f"  {p}")
-        else:
-            print("Visualizer Workbench complete. No plots were generated.")
+        if args.workbench == "visualize":
+            _run_visualizer_workbench(run)
         return
 
     if not args.csv_path:

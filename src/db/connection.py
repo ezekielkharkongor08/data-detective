@@ -1,14 +1,17 @@
-"""Database connection setup using SQLAlchemy + PostgreSQL.
+"""Database connection setup using SQLAlchemy.
 
-All database access goes through SQLAlchemy sessions. The URL comes from
-``DATABASE_URL`` in ``.env`` (never hardcoded).
+Supports PostgreSQL (when ``DATABASE_URL`` is set) and SQLite (default, at
+``./data_detective.db`` or ``DATABASE_PATH``). All database access goes
+through SQLAlchemy sessions. The URL comes from ``DATABASE_URL`` in ``.env``
+(never hardcoded).
 """
 
 from __future__ import annotations
 
 from typing import Generator
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, event, text
+from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from src.config import get_settings
@@ -19,7 +22,28 @@ class Base(DeclarativeBase):
 
 
 _settings = get_settings()
-engine = create_engine(_settings.database_url, pool_pre_ping=True)
+_is_sqlite = _settings.database_url.startswith("sqlite")
+
+_engine_kwargs: dict = {"pool_pre_ping": True}
+if _is_sqlite:
+    # SQLite needs check_same_thread=False so the checkpointer and the app can
+    # share the connection across threads.
+    _engine_kwargs["connect_args"] = {"check_same_thread": False}
+
+
+def _make_engine() -> Engine:
+    engine = create_engine(_settings.database_url, **_engine_kwargs)
+
+    if _is_sqlite:
+        # Enforce foreign keys on every SQLite connection.
+        @event.listens_for(engine, "connect")
+        def _enable_foreign_keys(dbapi_connection, connection_record):  # noqa: ARG001
+            dbapi_connection.execute("PRAGMA foreign_keys=ON")
+
+    return engine
+
+
+engine = _make_engine()
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 
@@ -35,25 +59,20 @@ def get_db() -> Generator[Session, None, None]:
         db.close()
 
 
-def _admin_connection_string() -> str:
-    """Build a connection string to the postgres admin database.
+def create_database_if_not_exists() -> None:
+    """Create the target database if it does not exist (Postgres only).
 
-    CREATE DATABASE cannot run inside a transaction, so we connect to the
-    ``postgres`` maintenance database and run it with AUTOCOMMIT.
+    For SQLite the database file is created automatically on first connect, so
+    this is a no-op. SQLAlchemy cannot create a database while connected to it,
+    so Postgres connects to the ``postgres`` admin database first.
     """
-    return (
+    if _is_sqlite:
+        return
+    admin_connection_string = (
         f"postgresql+psycopg://{_settings.postgres_user}:{_settings.postgres_password}"
         f"@{_settings.postgres_host}:{_settings.postgres_port}/postgres"
     )
-
-
-def create_database_if_not_exists() -> None:
-    """Create the target PostgreSQL database if it does not exist.
-
-    SQLAlchemy cannot create a database while connected to it, so this
-    connects to the ``postgres`` admin database first.
-    """
-    admin_engine = create_engine(_admin_connection_string(), isolation_level="AUTOCOMMIT")
+    admin_engine = create_engine(admin_connection_string, isolation_level="AUTOCOMMIT")
     try:
         with admin_engine.connect() as conn:
             result = conn.execute(
@@ -70,7 +89,7 @@ def init_db() -> None:
     """Create all tables defined on ``Base``.
 
     Safe to call on startup; tables that already exist are left untouched.
-    Automatically creates the target database if it does not exist.
+    Automatically creates the target database if it does not exist (Postgres).
     """
     create_database_if_not_exists()
     Base.metadata.create_all(bind=engine)

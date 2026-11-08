@@ -38,4 +38,15 @@ def detect_target_type(series: pd.Series) -> str:
     return "multiclass"
 
 
-__all__ = ["detect_target_type"]
+def is_classification_target(series: pd.Series) -> bool:
+    """Return True when ``series`` is a classification target
+    (binary, boolean, or multiclass).
+
+    Class labels have no meaningful skew or outliers, so only the target
+    column itself is excluded from the skewness and outlier checks rather
+    than skipping the whole check.
+    """
+    return detect_target_type(series) in ("binary", "boolean", "multiclass")
+
+
+__all__ = ["detect_target_type", "is_classification_target"]

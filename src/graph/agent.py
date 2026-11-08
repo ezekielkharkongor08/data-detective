@@ -17,7 +17,7 @@ from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode, tools_condition
 from typing_extensions import TypedDict
 
-from src.graph.tools import ALL_TOOLS, _parse
+from src.graph.tools import ALL_TOOLS, _make_tool, _parse
 from src.schemas.finding import Finding
 from src.tools.checks import get_checks
 
@@ -137,7 +137,24 @@ def run_checks_with_agent(
 
     Deduplicated ``Finding`` objects produced by the tools the agent chose;
     also returns the full agent message history.
+
+    ``csv_path``/``target_column``/``profile`` are bound into each tool from
+    agent state, so the LLM controls only which tool to call and optional
+    check parameters; it cannot redirect a check to a different file or drop
+    the semantic profile.
     """
+    if tools is None:
+        from src.tools.checks import get_checks
+
+        tools = [
+            _make_tool(
+                spec,
+                csv_path=csv_path,
+                target_column=target_column,
+                profile=profile,
+            )
+            for spec in get_checks(agent_tool=True)
+        ]
     agent = build_check_agent(llm, tools=tools)
 
     # The LLM receives a compact digest, never the full profile. The full

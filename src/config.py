@@ -32,19 +32,42 @@ class Settings(BaseSettings):
     postgres_password: str = ""
     postgres_db: str = "data_detective"
 
+    # SQLite file used when DATABASE_URL is unset.
+    database_path: str = "./data_detective.db"
+
     # Built from the postgres_* fields above when not set directly.
     database_url: str | None = None
 
     @model_validator(mode="after")
     def _build_database_url(self) -> "Settings":
-        """Build DATABASE_URL from individual postgres_* fields when not given."""
+        """Build DATABASE_URL from individual postgres_* fields when not given.
+
+        When ``DATABASE_URL`` is unset we fall back to a local SQLite file at
+        ``database_path`` so the project runs without PostgreSQL.
+        """
         if self.database_url:
             return self
-        self.database_url = (
-            f"postgresql+psycopg://{self.postgres_user}:{self.postgres_password}"
-            f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
-        )
+        if self.database_path:
+            self.database_url = f"sqlite:///{self.database_path}"
+        else:
+            self.database_url = (
+                f"postgresql+psycopg://{self.postgres_user}:{self.postgres_password}"
+                f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
+            )
         return self
+
+    @property
+    def backend_name(self) -> str:
+        """Return ``"postgres"`` or ``"sqlite"`` based on the resolved URL."""
+        return "sqlite" if self.database_url.startswith("sqlite") else "postgres"
+
+    @property
+    def is_sqlite(self) -> bool:
+        return self.backend_name == "sqlite"
+
+    @property
+    def is_postgres(self) -> bool:
+        return self.backend_name == "postgres"
 
     @property
     def postgres_conn_string(self) -> str:

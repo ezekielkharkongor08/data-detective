@@ -14,8 +14,12 @@ import pandas as pd
 
 from src.check_config import check_config
 from src.schemas.finding import Finding, Severity
-from src.tools.checks.registry import register_check
-from src.tools.target_type import detect_target_type
+from src.tools.checks.registry import info_note, register_check
+from src.tools.target_type import is_classification_target
+
+# Fewer distinct values than this make IQR outlier detection meaningless:
+# the quartiles collapse and nearly every value would be flagged.
+MIN_DISTINCT_VALUES = 3
 
 
 @register_check(
@@ -35,14 +39,17 @@ def outlier_check(df: pd.DataFrame, target_column: Optional[str] = None) -> list
     """
     findings: list[Finding] = []
 
-    # Skip for classification targets — redundant with the class_imbalance
-    # check; outliers only matter for regression targets.
+    # Class labels (binary, boolean, multiclass) have no meaningful
+    # outliers, so only the target column itself is excluded; eligible
+    # feature columns are still analyzed. Continuous targets are analyzed
+    # like any other column.
+    target_is_classification = False
     if target_column and target_column in df.columns:
-        target = df[target_column].dropna()
-        if len(target) > 0:
-            target_type = detect_target_type(target)
-            if target_type in ("binary", "multiclass"):
-                return []
+        target_series = df[target_column].dropna()
+        if len(target_series) > 0:
+            target_is_classification = is_classification_target(target_series)
+
+    degenerate_columns: list[str] = []
 
     for col in df.columns:
         series = df[col]
@@ -50,6 +57,8 @@ def outlier_check(df: pd.DataFrame, target_column: Optional[str] = None) -> list
         # Type guard for direct callers; the registry gates this check to
         # numeric semantics normally.
         if not pd.api.types.is_numeric_dtype(series):
+            continue
+        if col == target_column and target_is_classification:
             continue
 
         clean = series.dropna()
@@ -61,6 +70,13 @@ def outlier_check(df: pd.DataFrame, target_column: Optional[str] = None) -> list
         q1 = float(clean.quantile(0.25))
         q3 = float(clean.quantile(0.75))
         iqr = q3 - q1
+
+        # Degenerate IQR: the bounds collapse to a single value (or there
+        # are too few distinct values), so every other value would be
+        # flagged as an outlier. Skip the column and report it in a note.
+        if iqr == 0 or clean.nunique() < MIN_DISTINCT_VALUES:
+            degenerate_columns.append(col)
+            continue
 
         lower_bound = q1 - 1.5 * iqr
         upper_bound = q3 + 1.5 * iqr
@@ -75,22 +91,49 @@ def outlier_check(df: pd.DataFrame, target_column: Optional[str] = None) -> list
         else:
             continue
 
+        evidence = (
+            f"Column '{col}' has {outlier_count} outlier(s) "
+            f"({outlier_pct:.2f}% of {len(clean)} non-null rows) "
+            f"outside [{lower_bound:.4f}, {upper_bound:.4f}] "
+            f"(IQR method)."
+        )
+        if col == target_column:
+            evidence += (
+                " This is the target column: review these rows before "
+                "removing them; consider a log transform or a robust loss."
+            )
+
         findings.append(
             Finding(
                 check_name="outliers",
                 severity=severity,
-                evidence=(
-                    f"Column '{col}' has {outlier_count} outlier(s) "
-                    f"({outlier_pct:.2f}% of {len(clean)} non-null rows) "
-                    f"outside [{lower_bound:.4f}, {upper_bound:.4f}] "
-                    f"(IQR method)."
-                ),
+                evidence=evidence,
                 affected_columns=[col],
                 confidence=0.9,
             )
         )
 
+    if degenerate_columns:
+        findings.insert(
+            0,
+            info_note(
+                "outliers",
+                (
+                    f"Skipped {len(degenerate_columns)} column(s) in the "
+                    f"outliers check: too few distinct values for IQR "
+                    f"outlier detection: {_cap_column_names(degenerate_columns)}."
+                ),
+            ),
+        )
+
     return findings
+
+
+def _cap_column_names(cols: list[str], limit: int = 6) -> str:
+    """Cap a column list with ``and N more`` when it exceeds the limit."""
+    if len(cols) <= limit:
+        return ", ".join(cols)
+    return f"{', '.join(cols[:limit])} and {len(cols) - limit} more"
 
 
 __all__ = ["outlier_check"]

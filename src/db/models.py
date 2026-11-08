@@ -13,6 +13,7 @@ from typing import Any
 
 from sqlalchemy import DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.types import JSON
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 from src.db.connection import Base
@@ -64,7 +65,9 @@ class Finding(Base):
     check_name: Mapped[str] = mapped_column(String, nullable=False)
     severity: Mapped[str] = mapped_column(String, nullable=False)
     evidence: Mapped[str] = mapped_column(Text, nullable=False)
-    affected_columns: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
+    affected_columns: Mapped[list[str] | None] = mapped_column(
+        JSON().with_variant(JSONB, "postgresql"), nullable=True
+    )
     confidence: Mapped[float] = mapped_column(Integer, nullable=False, default=100)  # stored as 0-100 int
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
 
@@ -78,7 +81,9 @@ class Report(Base):
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     audit_run_id: Mapped[str] = mapped_column(ForeignKey("audit_runs.id"), nullable=False, unique=True)
-    report_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    report_json: Mapped[dict[str, Any]] = mapped_column(
+        JSON().with_variant(JSONB, "postgresql"), nullable=False
+    )
     report_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     generated_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
 
