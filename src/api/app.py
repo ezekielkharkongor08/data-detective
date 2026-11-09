@@ -26,9 +26,13 @@ from sqlalchemy import text
 
 import src.db.connection as _db_connection
 from src.config import get_settings
-from src.db.repository import get_run, list_runs
+from src.db.repository import ensure_schema, get_run, list_runs
 from src.graph.audit_runner import AuditResult, build_check_params, run_audit
 from src.workbench.visualizer.visualizer_tools import PLOTS_DIR, generate_plots, profile_dataset
+
+# Ensure the database and tables exist on startup so a deleted or missing
+# database is recreated automatically (same behavior as the CLI).
+ensure_schema()
 
 app = FastAPI(title="Data Detective API")
 
@@ -105,6 +109,30 @@ def _validate_csv(csv_path: str, target: str) -> None:
         raise HTTPException(status_code=400, detail="could not parse CSV file")
     if target not in [str(c) for c in header_df.columns]:
         raise HTTPException(status_code=400, detail=f"target column {target!r} not found in CSV")
+
+
+def _parse_semantic_overrides(value: str) -> dict[str, str]:
+    """Parse ``COLUMN=TYPE,COLUMN2=TYPE2`` into a dict.
+
+    Invalid entries (missing '=', unknown type) are skipped silently.
+    Mirrors the CLI's ``--semantic-override`` translation.
+    """
+    from src.tools.profiling import SEMANTIC_TYPES
+
+    overrides: dict[str, str] = {}
+    for part in value.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "=" not in part:
+            continue
+        name, new_type = part.split("=", 1)
+        name = name.strip()
+        new_type = new_type.strip()
+        if new_type not in SEMANTIC_TYPES:
+            continue
+        overrides[name] = new_type
+    return overrides
 
 
 def _ollama_reachable() -> bool:
@@ -273,6 +301,7 @@ def start_audit(
     mode: str = Form("agent"),
     sensitive: str = Form(""),
     favorable: str | None = Form(None),
+    semantic_override: str = Form(""),
 ) -> AuditStart:
     """Upload a CSV and start an audit. Returns immediately with a run id."""
     if mode not in ("agent", "deterministic"):
@@ -300,7 +329,7 @@ def start_audit(
         sensitive=[s for s in sensitive.split(",") if s.strip()],
         favorable=favorable or None,
     )
-    semantic_overrides: dict[str, str] = {}
+    semantic_overrides = _parse_semantic_overrides(semantic_override)
 
     with _RUNS_LOCK:
         _RUNS[run_id] = {

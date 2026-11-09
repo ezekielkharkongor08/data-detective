@@ -1,0 +1,45 @@
+# Git
+.git
+
+# Secrets and local config
+.env
+.env.local
+
+# Python
+myenv/
+venv/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.coverage
+htmlcov/
+*.egg-info/
+*.egg
+dist/
+build/
+.eggs/
+
+# Data Detective runtime (generated at runtime)
+data/raw/
+plots/
+uploads/
+*.db
+data_detective.db
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+
+
+
+docs/
+AGENTS.md
