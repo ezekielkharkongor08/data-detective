@@ -34,55 +34,30 @@ Before training machine learning models or deploying analytics pipelines, real-w
 
 ## 🏗️ Architecture
 
-```
-                     ┌─────────────────────────────────────────┐
-                     │          Raw CSV Dataset Upload         │
-                     └────────────────────┬────────────────────┘
-                                          │
-                     ┌────────────────────▼────────────────────┐
-                     │   Ingestion & Semantic Profiling Engine │
-                     │  • Resilient parsing (UTF-8, Latin-1)   │
-                     │  • Classifies 10 semantic column types  │
-                     │  • ZERO raw rows ever sent to the LLM   │
-                     └────────────────────┬────────────────────┘
-                                          │  Statistical Profile Digest
-                     ┌────────────────────┴────────────────────┐
-                     │                                         │
-        ┌────────────▼──────────────┐             ┌────────────▼──────────────┐
-        │   🤖 AGENTIC AUDIT MODE   │             │ ⚡ DETERMINISTIC PIPELINE │
-        │    (--agent / ReAct Loop) │             │    (Parallel Fan-Out)     │
-        │                           │             │                           │
-        │ 1. LLM inspects profile   │             │ Executes ALL check tools  │
-        │    digest & statistics    │             │ automatically in parallel:│
-        │ 2. Reasons on distributions│            │ • Missing & Sentinel Nulls│
-        │ 3. Selectively calls tools│             │ • Exact Duplicate Rows    │
-        │    with specific arguments│             │ • Schema Mismatches       │
-        │ 4. Accumulates findings   │             │ • Outliers & Skewness     │
-        └────────────┬──────────────┘             │ • Class Imbalance         │
-                     │                            │ • High-cardinality IDs    │
-                     │ (If target &               └────────────┬──────────────┘
-                     │  suspects present)                      │
-                     ▼                                         │
-        ┌───────────────────────────┐                          │
-        │   🔬 DEEP VALIDATION      │                          │
-        │ (5-Fold CV Leakage Models)│                          │
-        │ Verified if AUC > 0.85    │                          │
-        └────────────┬──────────────┘                          │
-                     │                                         │
-                     ▼                                         │
-        ┌───────────────────────────┐                          │
-        │ 📝 LLM SYNTHESIS REPORT   │                          │
-        │ Executive summary, root   │                          │
-        │ causes & prioritized fixes│                          │
-        └────────────┬──────────────┘                          │
-                     │                                         │
-                     │  Executive Report + Findings            │  Raw Findings
-                     └────────────────────┬────────────────────┘
-                                          │
-                     ┌────────────────────▼────────────────────┐
-                     │   Persistence & Tracing (LangSmith)     │
-                     │  PostgreSQL / Local SQLite + Checkpoints│
-                     └─────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    CSV["📄 Raw CSV Upload"] --> Profile["⚙️ Ingestion & Semantic Profiling\n(Encoding fallback, delimiter detection & compact statistical digest)"]
+    
+    Profile --> Mode{"Select Mode"}
+    
+    %% Deterministic Path
+    Mode -->|"⚡ Deterministic (Default)"| DetSuite["Full Check Fan-Out\n(Runs all registered checks in parallel:\nmissing, duplicates, schema, imbalance, outliers, skew, IDs)"]
+    DetSuite --> DetMerge["Merge & Deduplicate Findings\n(SHA-256 evidence hashing)"]
+    DetMerge --> DetOut["📋 Raw Findings\n(Structured Pydantic findings only)"]
+
+    %% Agentic Path
+    Mode -->|"🤖 Agentic (--agent)"| AgentLoop["🧠 LLM ReAct Decision Loop\n(Inspects profile digest, reasons on distributions,\nand selectively invokes tools)"]
+    AgentLoop --> AgentGate{"Target Leakage\nSuspected?"}
+    AgentGate -->|Yes| AgentDeep["🔬 Deep Validation\n(5-fold CV baseline modeling)"]
+    AgentGate -->|No| AgentSynth["📝 LLM Synthesis\n(Executive summary, root causes & prioritized fixes)"]
+    AgentDeep --> AgentSynth
+    AgentSynth --> AgentOut["📋 Audit Report\n(Findings + Executive Synthesis)"]
+
+    %% Convergence
+    DetOut --> Storage[("💾 Persistence & Checkpointing\nPostgreSQL or Local SQLite")]
+    AgentOut --> Storage
+
+    Storage -.->|"Optional: /audits/:id/plots"| Viz["📊 Visualizer Workbench\n(Auto-generated diagnostic charts)"]
 ```
 
 ### Execution Modes
@@ -90,7 +65,7 @@ Before training machine learning models or deploying analytics pipelines, real-w
 * **⚡ Deterministic Pipeline (Default):** Runs the full suite of specialized check tools simultaneously across all eligible columns. Fast, purely rule-based, and outputs structured findings directly with zero LLM overhead.
 * **🤖 Agentic Audit Mode (`--agent`):** The LLM receives only a compact, token-budgeted profile digest (column data types, null ratios, and summary statistics). It reasons over the dataset profile, dynamically decides which check tools to invoke with specific arguments, triggers deep 5-fold cross-validation when target leakage is suspected, and synthesizes all evidence into an executive report with prioritized fixes.
 
-> **Service & UI:** The core engine is served through a **FastAPI** backend and an interactive **Streamlit** dashboard. See [`ARCHITECTURE.md`](file:///e:/data-detective/ARCHITECTURE.md) for full REST API endpoint specifications.
+> **Service & UI:** The core engine is served through a **FastAPI** backend and an interactive **Streamlit** dashboard. See [`ARCHITECTURE.md`] for full REST API endpoint specifications.
 
 ---
 
@@ -111,43 +86,53 @@ Before training machine learning models or deploying analytics pipelines, real-w
 
 ## 🚀 Quick Start with Docker (Recommended)
 
-Run the full stack (**FastAPI Backend** + **Streamlit Web UI** + **Persistence**) in one command.
+Run the full stack (**FastAPI Backend** + **Streamlit Web UI** + **Persistence**) in a single command with Docker Compose:
 
 ### Prerequisites
-- [Docker Desktop](https://www.docker.com/products/docker-desktop/)
-- [Ollama](https://ollama.com/) running on your host machine (for `agent` mode):
+- [Docker Desktop](https://www.docker.com/products/docker-desktop/) installed and running.
+- *(Optional, for Agent mode)* [Ollama](https://ollama.com/) running on your host machine:
   ```bash
   ollama pull llama3.1:8b
   ```
 
-### 1. Clone & Configure
+### Launch the Stack
+
 ```bash
-git clone https://github.com/<your-username>/data-detective.git
-cd data-detective
-cp .env.example .env
+docker compose up
 ```
 
-### 2. Launch Stack (Default: SQLite)
-```bash
-docker compose up --build
-```
+- 🌐 **Streamlit UI:** [http://localhost:8501](http://localhost:8501)
+- 📚 **FastAPI Swagger Docs:** [http://localhost:8000/docs](http://localhost:8000/docs)
+- 🩺 **Health Check:** [http://localhost:8000/health](http://localhost:8000/health)
 
-- 🌐 **Streamlit UI:** [http://127.0.0.1:8501](http://127.0.0.1:8501)
-- 📚 **FastAPI Swagger Docs:** [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
-- 🩺 **Health Check:** [http://127.0.0.1:8000/health](http://127.0.0.1:8000/health)
+### 📥 Viewing & Exporting Audit Results
 
-*(Optional)* **PostgreSQL Backend:**
+All audit runs, findings, and reports are saved automatically to SQLite (`/app/data/data_detective.db`).
+
+* **From the Web UI:** Click the **"Past audits"** tab to view audit history or click **Download Report (.txt / .json)**.
+* **Copy the SQLite Database to your local machine:**
+  ```bash
+  # 1. Check your running container name
+  docker ps
+
+  # 2. Copy the database file into your current folder
+  docker cp data-detective-api:/app/data/data_detective.db ./data_detective.db
+  ```
+
+*(Optional)* Run with PostgreSQL instead of SQLite:
 ```bash
-# Set DATABASE_URL in .env to connect to the db service:
-docker compose --profile postgres up --build
+docker compose --profile postgres up
 ```
 
 ---
 
 ## 💻 Local Development Setup (Without Docker)
 
-### 1. Environment & Dependencies
+### 1. Clone & Dependencies
 ```bash
+git clone https://github.com/ezekielkharkongor/data-detective.git
+cd data-detective
+
 python -m venv .venv
 source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 pip install -r requirements.txt
@@ -221,6 +206,3 @@ pytest tests/
 
 ---
 
-## 📄 License
-
-This project is licensed under the MIT License.

@@ -142,6 +142,14 @@ def _compact_finding(f: dict) -> dict:
 
 
 @traceable(name="build_llm_payload", run_type="chain")
+def _highest_severity(findings: list[dict]) -> Severity:
+    """Return the highest severity among findings (INFO when empty)."""
+    if not findings:
+        return Severity.INFO
+    finding_objs = [Finding.model_validate(f) for f in findings]
+    return min(finding_objs).severity
+
+
 def _build_payload(profile: dict, findings: list) -> str:
     """Build the JSON payload sent to the LLM.
 
@@ -149,8 +157,6 @@ def _build_payload(profile: dict, findings: list) -> str:
     the LLM receives one bullet per check type per severity level and can
     never emit duplicate bullets for the same check+severity combination.
     """
-    from src.graph.nodes import _highest_severity
-
     grouped = _group_findings(findings)
     ordered = _sort_findings(grouped)
     shown = ordered[:MAX_FINDINGS_IN_PROMPT]
@@ -242,8 +248,6 @@ def make_synthesize_findings_node(llm: Any) -> Callable[[GraphState], GraphState
             summary = _fallback_summary(profile, findings, error_note or "reply too short")
 
         # Severity is computed from the findings, not trusted to the LLM.
-        from src.graph.nodes import _highest_severity
-
         return {
             "summary": summary,
             "overall_severity": _highest_severity(findings).value,

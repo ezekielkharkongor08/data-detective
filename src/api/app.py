@@ -374,7 +374,10 @@ def get_audit(run_id: str) -> AuditStatus:
 @app.get("/audits", response_model=list[RunSummary])
 def list_audits() -> list[RunSummary]:
     """List past runs: database runs plus in-memory runs not yet saved."""
-    db_runs = list_runs()
+    try:
+        db_runs = list_runs()
+    except Exception:
+        db_runs = []
     known_ids = {r["run_id"] for r in db_runs}
     summaries: list[RunSummary] = []
     for r in db_runs:

@@ -29,10 +29,7 @@ flowchart TD
         subgraph Deterministic ["⚡ Deterministic Pipeline (Default)"]
             Profile --> FanOut["Parallel Checks Fan-Out\n(Executes ALL registered checks)"]
             FanOut --> Merge["merge_findings_node\n(Deduplicated via SHA-256 evidence reducer)"]
-            Merge --> Router["router_node\n(Evaluates target leakage suspicion)"]
-            Router -->|Leakage suspected| DeepDet["deep_checks_node\n(5-fold CV baseline models)"]
-            Router -->|No leakage| RepDet["report_node\n(Raw structured findings)"]
-            DeepDet --> RepDet
+            Merge --> RepDet["report_node\n(Raw structured findings)"]
         end
         
         subgraph Agentic ["🤖 Agentic Mode (--agent)"]

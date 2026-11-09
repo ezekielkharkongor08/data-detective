@@ -27,6 +27,12 @@ USER appuser
 
 # Ollama runs on the host, not in this container.
 ENV OLLAMA_BASE_URL=http://host.docker.internal:11434
+# Default API URL for Streamlit to connect to host-mapped FastAPI
+ENV API_URL=http://host.docker.internal:8000
+# Streamlit server defaults
+ENV STREAMLIT_SERVER_ADDRESS=0.0.0.0
+ENV STREAMLIT_SERVER_PORT=8501
+ENV STREAMLIT_SERVER_HEADLESS=true
 # SQLite default: database file lives in the data volume.
 ENV DATABASE_PATH=/app/data/data_detective.db
 # DATABASE_URL is intentionally not set here: an unset/empty value selects SQLite.
