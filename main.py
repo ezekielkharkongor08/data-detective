@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import uuid
 from contextlib import contextmanager
@@ -32,7 +33,8 @@ except ImportError:  # pragma: no cover - only when the sqlite dep is missing
 from src.config import get_settings
 from src.db.repository import ensure_schema, get_run, list_runs, save_run
 from src.graph.builder import build_agent_graph, build_graph
-from src.workbench.visualizer.visualizer_graph import build_visualizer_graph
+from src.tools.profiling import profile_dataset
+from src.workbench.visualizer.visualizer_tools import generate_plots
 
 
 def _parse_args() -> argparse.Namespace:
@@ -100,6 +102,17 @@ def _parse_args() -> argparse.Namespace:
         "--run-id",
         default=None,
         help="Run ID of a past audit run (required with --workbench).",
+    )
+    plot_group = parser.add_mutually_exclusive_group()
+    plot_group.add_argument(
+        "--plots",
+        action="store_true",
+        help="Generate plots after the audit without prompting.",
+    )
+    plot_group.add_argument(
+        "--no-plots",
+        action="store_true",
+        help="Skip plot generation after the audit without prompting.",
     )
     return parser.parse_args()
 
@@ -206,30 +219,70 @@ def _persisted_graph(use_agent: bool):
             yield _build(saver)
 
 
-def _run_visualizer_workbench(run: dict) -> None:
-    """Generate charts for an existing audit run."""
-    report_json = run.get("report_json") or {}
-    findings_in = report_json.get("findings") or []
-    csv_path = run.get("csv_path")
-    target_column = run.get("target_column")
+def _print_plot_report(report: object) -> None:
+    """Print the plot report: each saved path, a count, and every skip reason.
 
-    graph = build_visualizer_graph()
-    state = graph.invoke(
-        {
-            "findings_in": findings_in,
-            "csv_path": csv_path,
-            "target_column": target_column,
-            "want_plots": True,
-        }
-    )
-
-    plot_paths = state.get("plot_paths") or []
+    Never prints only "no plots were generated" without the reasons.
+    """
+    plot_paths = getattr(report, "plots", []) or []
+    skipped = getattr(report, "skipped", []) or []
     if plot_paths:
         print("Visualizer Workbench complete. Plots saved:")
         for p in plot_paths:
             print(f"  {p}")
-    else:
-        print("Visualizer Workbench complete. No plots were generated.")
+    print(f"{len(plot_paths)} plot(s) generated.")
+    if skipped:
+        print("Skipped plots:")
+        for item in skipped:
+            print(f"  - {item.get('reason')}")
+
+
+def _should_generate_plots(args: argparse.Namespace) -> bool:
+    """Decide whether to generate plots after an audit.
+
+    ``--plots`` forces yes, ``--no-plots`` forces no. Otherwise the user is
+    prompted on a TTY; non-interactive input defaults to no.
+    """
+    if args.plots:
+        return True
+    if args.no_plots:
+        return False
+    if not sys.stdin.isatty():
+        return False
+    try:
+        answer = input("Generate plots? [y/N] ")
+    except (EOFError, KeyboardInterrupt):
+        return False
+    return answer.strip().lower() in ("y", "yes")
+
+
+def _run_visualizer_workbench(run: dict) -> None:
+    """Generate charts for an existing audit run using deterministic plot selection.
+
+    The profile is not stored in the database, so it is recomputed from the CSV
+    (read-only V1 profiling). If the CSV no longer exists, prints a clear
+    message naming the path and returns without crashing.
+    """
+    report_json = run.get("report_json") or {}
+    findings = report_json.get("findings") or []
+    csv_path = run.get("csv_path")
+    target_column = run.get("target_column")
+
+    if not csv_path or not os.path.exists(csv_path):
+        print(f"Error: CSV file not found: {csv_path}")
+        return
+
+    # Recompute the profile from the CSV (read-only V1 profiling).
+    profile = profile_dataset(csv_path, target_column=target_column)
+
+    report = generate_plots(
+        findings=findings,
+        profile=profile,
+        csv_path=csv_path,
+        target_column=target_column,
+    )
+
+    _print_plot_report(report)
 
 
 def main() -> None:
@@ -330,6 +383,18 @@ def main() -> None:
             print(report_text)
         else:
             print("(no report produced)")
+
+        if _should_generate_plots(args):
+            # Generate plots from the in-memory audit results (no database
+            # read, no run id).
+            profile = state.get("profile") or {}
+            report = generate_plots(
+                findings=findings_raw,
+                profile=profile,
+                csv_path=args.csv_path,
+                target_column=args.target,
+            )
+            _print_plot_report(report)
 
 
 if __name__ == "__main__":

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable
@@ -42,7 +43,22 @@ PLOTS_DIR = _PROJECT_ROOT / "plots"
 _MIN_NUMERIC_SHARE = 0.9   # text columns count as numeric if >= 90% parse
 _MAX_HIST_BINS = 200       # guards against huge bin counts on skewed data
 _MAX_CLASSES = 50          # guards against unreadable bar charts
+MAX_PLOTS_PER_TYPE = 12   # per-column plots per check type before capping
+MAX_CORRELATION_COLUMNS = 30   # correlation heatmap column cap
+MAX_MISSING_BARS = 20     # missing-value bar chart column cap
+MAX_CATEGORICAL_PANELS = 6    # categorical count chart panel cap
+MAX_CATEGORICAL_CARDINALITY = 12    # max distinct values for a categorical panel
 _UNSAFE_FILENAME_CHARS = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
+
+_SEVERITY_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+
+
+@dataclass(frozen=True)
+class PlotReport:
+    """Result of deterministic plot selection: saved plot paths and skip reasons."""
+
+    plots: list[str]
+    skipped: list[dict[str, str | None]]
 
 
 # -------------------------------------------------------------------- helpers
@@ -407,8 +423,13 @@ def _plot_imbalance(csv_path: str, target_column: str) -> str:
     )
 
 
-def _plot_correlation(csv_path: str) -> str:
-    """Draw a heatmap of the correlation matrix for all numeric columns."""
+def _plot_correlation(csv_path: str, columns: list[str] | None = None) -> str:
+    """Draw a heatmap of the correlation matrix for numeric columns.
+
+    When ``columns`` is given, only those columns are plotted; otherwise all
+    numeric columns are used (default behavior unchanged for callers that
+    omit it).
+    """
     tool_name = "run_plot_correlation"
     try:
         df = _load_csv(csv_path)
@@ -421,7 +442,12 @@ def _plot_correlation(csv_path: str) -> str:
             f"Failed to read CSV: {type(exc).__name__}: {exc}",
         )
 
-    numeric_df = df.select_dtypes(include=[np.number])
+    if columns is None:
+        numeric_df = df.select_dtypes(include=[np.number])
+    else:
+        present = [c for c in columns if c in df.columns]
+        numeric_df = df[present].select_dtypes(include=[np.number])
+
     if numeric_df.empty or numeric_df.shape[1] < 2:
         return _result(
             tool_name,
@@ -522,6 +548,376 @@ run_plot_correlation = _make_tool(
 ALL_TOOLS = [run_plot_outliers, run_plot_skewness, run_plot_imbalance, run_plot_correlation]
 
 
+def _to_dict(result_json: str) -> dict:
+    """Parse a tool result JSON string into a dict, returning {} on failure."""
+    try:
+        return json.loads(result_json) if isinstance(result_json, str) else dict(result_json)
+    except Exception:
+        return {}
+
+
+def _ordered_affected_columns(findings: list[dict]) -> list[str]:
+    """Return affected columns ordered by finding severity, then column order, deduplicated."""
+    ordered: list[str] = []
+    seen: set[str] = set()
+    ranked = sorted(
+        findings, key=lambda f: _SEVERITY_RANK.get(str(f.get("severity", "info")), 9)
+    )
+    for f in ranked:
+        for col in f.get("affected_columns") or []:
+            if col not in seen:
+                seen.add(col)
+                ordered.append(col)
+    return ordered
+
+
+def generate_plots(
+    findings: list[dict],
+    profile: dict | None,
+    csv_path: str,
+    target_column: str | None,
+) -> PlotReport:
+    """Deterministically choose and render plots from findings and profile.
+
+    Never calls the LLM. Every failure becomes a skipped entry with a reason;
+    the function never raises. Inputs are plain data (findings, profile,
+    csv_path, target_column) so both the in-memory audit path and the run-id
+    path can call the same function.
+    """
+    plots: list[str] = []
+    skipped: list[dict[str, str | None]] = []
+    profile = profile or {}
+
+    # Missing or unreadable CSV.
+    try:
+        df = _load_csv(csv_path)
+    except Exception as exc:
+        return PlotReport(
+            plots=[],
+            skipped=[
+                {
+                    "plot": None,
+                    "reason": f"Failed to read CSV: {type(exc).__name__}: {exc}",
+                }
+            ],
+        )
+
+    # No findings and no usable profile facts.
+    if not findings and not profile.get("columns"):
+        return PlotReport(
+            plots=[],
+            skipped=[{"plot": None, "reason": "nothing to plot"}],
+        )
+
+    target_type = str(profile.get("target_type", "")).lower()
+    is_classification = target_type in ("binary", "boolean", "multiclass")
+
+    # Semantic lookup for column gating.
+    lookup = get_semantic_lookup(profile) if isinstance(profile, dict) else {}
+
+    # ── per-column plots: outliers and skewness ──
+    for check_name, tool_func in (
+        ("outliers", run_plot_outliers),
+        ("skewness", run_plot_skewness),
+    ):
+        check_findings = [f for f in findings if f.get("check_name") == check_name]
+        ordered = _ordered_affected_columns(check_findings)
+        if is_classification and target_column:
+            ordered = [c for c in ordered if c != target_column]
+        if len(ordered) > MAX_PLOTS_PER_TYPE:
+            skipped.append(
+                {
+                    "plot": None,
+                    "reason": (
+                        f"{len(ordered) - MAX_PLOTS_PER_TYPE} more column(s) not plotted"
+                    ),
+                }
+            )
+            ordered = ordered[:MAX_PLOTS_PER_TYPE]
+        for col in ordered:
+            result = _to_dict(tool_func.func(csv_path=csv_path, column=col))
+            if result.get("status") == "ok":
+                plots.append(result["plot_file"])
+            else:
+                skipped.append(
+                    {
+                        "plot": None,
+                        "reason": result.get(
+                            "evidence", f"{check_name} plot skipped for '{col}'."
+                        ),
+                    }
+                )
+
+    # ── imbalance (classification) / target distribution ──
+    if target_column:
+        if is_classification:
+            # Always produce the class-balance plot so even a balanced target
+            # gets a class plot; run_plot_imbalance guards continuous targets.
+            result = _to_dict(
+                run_plot_imbalance.func(
+                    csv_path=csv_path, target_column=target_column
+                )
+            )
+            if result.get("status") == "ok":
+                plots.append(result["plot_file"])
+                skipped.append(
+                    {
+                        "plot": None,
+                        "reason": "class balance plot covers the target.",
+                    }
+                )
+            else:
+                skipped.append(
+                    {
+                        "plot": None,
+                        "reason": result.get(
+                            "evidence", "imbalance plot skipped."
+                        ),
+                    }
+                )
+        else:
+            skipped.append(
+                {
+                    "plot": None,
+                    "reason": "imbalance plot skipped: continuous target.",
+                }
+            )
+            result = _to_dict(_plot_target_distribution(csv_path, target_column))
+            if result.get("status") == "ok":
+                plots.append(result["plot_file"])
+            else:
+                skipped.append(
+                    {
+                        "plot": None,
+                        "reason": result.get(
+                            "evidence", "target distribution skipped."
+                        ),
+                    }
+                )
+
+    # ── correlation heatmap ──
+    numeric_cols = [
+        col
+        for col, sem in lookup.items()
+        if sem.get("type") in ("numeric_measurement", "numeric_discrete")
+    ]
+    if len(numeric_cols) >= 2:
+        selected = numeric_cols
+        if len(numeric_cols) > MAX_CORRELATION_COLUMNS:
+            # Choose the highest-variance columns so the heatmap stays
+            # readable on wide datasets; note how many were left out.
+            variances = df[numeric_cols].var(numeric_only=True).sort_values(
+                ascending=False
+            )
+            selected = list(variances.index[:MAX_CORRELATION_COLUMNS])
+            skipped.append(
+                {
+                    "plot": None,
+                    "reason": (
+                        f"Correlation heatmap capped at {MAX_CORRELATION_COLUMNS} "
+                        f"column(s); {len(numeric_cols) - MAX_CORRELATION_COLUMNS} "
+                        f"more column(s) not included."
+                    ),
+                }
+            )
+        result = _to_dict(
+            run_plot_correlation.func(csv_path=csv_path, columns=selected)
+        )
+        if result.get("status") == "ok":
+            plots.append(result["plot_file"])
+        else:
+            skipped.append(
+                {"plot": None, "reason": result.get("evidence", "correlation plot skipped.")}
+            )
+    elif len(numeric_cols) == 1:
+        skipped.append(
+            {
+                "plot": None,
+                "reason": "Need at least two numeric columns for a correlation matrix.",
+            }
+        )
+
+    # ── missing values combined bar chart ──
+    missing_findings = [f for f in findings if f.get("check_name") == "missing_values"]
+    missing_cols = _ordered_affected_columns(missing_findings)
+    if missing_cols:
+        result = _to_dict(_plot_missing_values(csv_path, missing_cols))
+        if result.get("status") == "ok":
+            plots.append(result["plot_file"])
+        else:
+            skipped.append(
+                {
+                    "plot": None,
+                    "reason": result.get(
+                        "evidence", "missing values plot skipped."
+                    ),
+                }
+            )
+
+    # ── categorical counts combined image ──
+    categorical_cols = [
+        col
+        for col, sem in lookup.items()
+        if sem.get("type") == "categorical"
+        and col != target_column
+        and col in df.columns
+        and df[col].nunique(dropna=True) <= MAX_CATEGORICAL_CARDINALITY
+    ][:MAX_CATEGORICAL_PANELS]
+    if categorical_cols:
+        result = _to_dict(_plot_categorical_counts(csv_path, categorical_cols))
+        if result.get("status") == "ok":
+            plots.append(result["plot_file"])
+        else:
+            skipped.append(
+                {
+                    "plot": None,
+                    "reason": result.get(
+                        "evidence", "categorical counts plot skipped."
+                    ),
+                }
+            )
+
+    return PlotReport(plots=plots, skipped=skipped)
+
+
+def _plot_missing_values(csv_path: str, columns: list[str]) -> str:
+    """Draw one combined bar chart of missing percentage per column."""
+    tool_name = "run_plot_missing_values"
+    try:
+        df = _load_csv(csv_path)
+    except Exception as exc:
+        return _result(
+            tool_name,
+            None,
+            "error",
+            [],
+            f"Failed to read CSV: {type(exc).__name__}: {exc}",
+        )
+    n_rows = len(df)
+    missing: list[tuple[str, float]] = []
+    for col in columns:
+        if col in df.columns:
+            pct = int(df[col].isna().sum()) / n_rows * 100 if n_rows else 0.0
+            if pct > 0:
+                missing.append((col, pct))
+    missing.sort(key=lambda item: item[1], reverse=True)
+    top = missing[:MAX_MISSING_BARS]
+    if not top:
+        return _result(tool_name, None, "skipped", [], "No missing values to plot.")
+    cols = [item[0] for item in top]
+    vals = [item[1] for item in top]
+
+    def draw(ax: Any) -> None:
+        ax.bar(range(len(cols)), vals)
+        ax.set_xticks(range(len(cols)))
+        ax.set_xticklabels([_safe_filename(c) for c in cols], rotation=45, ha="right")
+        ax.set_title("Missing Values by Column")
+        ax.set_ylabel("Missing %")
+
+    return _render(
+        tool_name,
+        "combined",
+        "missing_values",
+        "Missing value bar chart saved.",
+        draw,
+        subfolder=_dataset_subfolder(csv_path),
+    )
+
+
+def _plot_categorical_counts(csv_path: str, columns: list[str]) -> str:
+    """Draw one combined image with count bars for low-cardinality categorical columns."""
+    tool_name = "run_plot_categorical_counts"
+    try:
+        df = _load_csv(csv_path)
+    except Exception as exc:
+        return _result(
+            tool_name,
+            None,
+            "error",
+            [],
+            f"Failed to read CSV: {type(exc).__name__}: {exc}",
+        )
+    n = len(columns)
+    if n == 0:
+        return _result(tool_name, None, "skipped", [], "No categorical columns to plot.")
+    fig = Figure(figsize=(max(6, n * 3), 4))
+    axes = fig.subplots(1, n)
+    if n == 1:
+        axes = [axes]
+    plotted: list[str] = []
+    for ax, col in zip(axes, columns):
+        if col not in df.columns:
+            continue
+        counts = df[col].value_counts(dropna=True).sort_index()
+        ax.bar(range(len(counts)), counts.to_numpy())
+        ax.set_xticks(range(len(counts)))
+        ax.set_xticklabels([_safe_filename(str(c)) for c in counts.index], rotation=45, ha="right")
+        ax.set_title(col)
+        ax.set_ylabel("Count")
+        plotted.append(col)
+    if not plotted:
+        return _result(tool_name, None, "skipped", [], "No plottable categorical columns.")
+    fig.tight_layout()
+    plot_file = _save_fig(
+        fig, "categorical_counts_combined.png", subfolder=_dataset_subfolder(csv_path)
+    )
+    return _result(tool_name, plot_file, "ok", plotted, "Categorical count chart saved.")
+
+
+def _plot_target_distribution(csv_path: str, target_column: str) -> str:
+    """Draw the target distribution: class counts for classification, histogram for continuous."""
+    tool_name = "run_plot_target_distribution"
+    series, stop = _get_column(tool_name, csv_path, target_column)
+    if stop is not None:
+        return stop
+    target_type = detect_target_type(series)
+    subfolder = _dataset_subfolder(csv_path)
+
+    if target_type in ("binary", "boolean", "multiclass"):
+        counts = series.value_counts().sort_index()
+
+        def draw(ax: Any) -> None:
+            ax.bar(range(len(counts)), counts.to_numpy())
+            ax.set_xticks(range(len(counts)))
+            ax.set_xticklabels([str(c) for c in counts.index])
+            ax.set_title(f"Target Distribution of {target_column}")
+            ax.set_ylabel("Count")
+
+        return _render(
+            tool_name,
+            target_column,
+            "target_distribution",
+            f"Target distribution saved for '{target_column}'.",
+            draw,
+            subfolder=subfolder,
+        )
+
+    values = _numeric_values(series)
+    if values is None:
+        return _result(
+            tool_name,
+            None,
+            "skipped",
+            [target_column],
+            f"Column '{target_column}' has no numeric values to plot.",
+        )
+
+    def draw(ax: Any) -> None:
+        ax.hist(values, bins=_hist_bins(values))
+        ax.set_title(f"Target Distribution of {target_column}")
+        ax.set_xlabel(target_column)
+        ax.set_ylabel("Count")
+
+    return _render(
+        tool_name,
+        target_column,
+        "target_distribution",
+        f"Target distribution saved for '{target_column}'.",
+        draw,
+        subfolder=subfolder,
+    )
+
+
 __all__ = [
     "run_plot_outliers",
     "run_plot_skewness",
@@ -529,4 +925,9 @@ __all__ = [
     "run_plot_correlation",
     "ALL_TOOLS",
     "PLOTS_DIR",
+    "generate_plots",
+    "PlotReport",
+    "_plot_missing_values",
+    "_plot_categorical_counts",
+    "_plot_target_distribution",
 ]
