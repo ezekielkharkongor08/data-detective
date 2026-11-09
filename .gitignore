@@ -1,19 +1,28 @@
-# Python-generated files
+# Data Detective
+
+# M7 uploads and plots (generated at runtime, not committed)
+uploads/
+plots/
+
+# Local SQLite database
+*.db
+data_detective.db
+
+# Python
 __pycache__/
-*.py[oc]
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+.env
+*.egg-info/
+.dist-info/
 build/
 dist/
-wheels/
-*.egg-info
 
-# Virtual environments
-myenv/
-
-# Secrets / local config (never commit .env)
-.env
-
-AGENTS.md
-CODEBASE_AUDIT_REPORT.md
-DATA_DETECTIVE_PROJECT_BRIEF.md
-
-plots/
+# OS
+.DS_Store
+Thumbs.db

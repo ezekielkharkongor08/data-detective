@@ -98,13 +98,21 @@ def _dataset_subfolder(csv_path: str) -> str:
     return Path(csv_path).stem
 
 
-def _save_fig(fig: Figure, filename: str, subfolder: str | None = None) -> str:
+def _save_fig(
+    fig: Figure, filename: str, subfolder: str | None = None, output_dir: str | None = None
+) -> str:
     """Save a figure under ``plots/`` (optionally inside a dataset subfolder).
 
+    When ``output_dir`` is given, the figure is saved there directly instead of
+    under ``plots/<subfolder>/``. This lets the API isolate each run's plots in
+    ``plots/<run_id>/`` without changing the default CLI behaviour.
     Returns the saved path.
     """
     PLOTS_DIR.mkdir(parents=True, exist_ok=True)
-    target_dir = PLOTS_DIR / subfolder if subfolder else PLOTS_DIR
+    if output_dir is not None:
+        target_dir = Path(output_dir)
+    else:
+        target_dir = PLOTS_DIR / subfolder if subfolder else PLOTS_DIR
     target_dir.mkdir(parents=True, exist_ok=True)
     plot_path = target_dir / filename
     fig.savefig(plot_path, bbox_inches="tight", dpi=100)
@@ -202,13 +210,17 @@ def _render(
     evidence: str,
     draw: Callable[[Any], None],
     subfolder: str | None = None,
+    output_dir: str | None = None,
 ) -> str:
     """Create a figure, draw on it, save it, and return the JSON result."""
     try:
         fig = Figure()
         draw(fig.subplots())
         plot_file = _save_fig(
-            fig, f"{prefix}_{_safe_filename(column)}.png", subfolder=subfolder
+            fig,
+            f"{prefix}_{_safe_filename(column)}.png",
+            subfolder=subfolder,
+            output_dir=output_dir,
         )
     except Exception as exc:
         return _result(
@@ -281,7 +293,7 @@ def _semantic_or_stop(
 
 # ---------------------------------------------------------------------- tools
 
-def _plot_outliers(csv_path: str, column: str) -> str:
+def _plot_outliers(csv_path: str, column: str, output_dir: str | None = None) -> str:
     """Draw a boxplot for ``column`` and save it as a PNG.
 
     Only runs on ``numeric_measurement`` / ``numeric_discrete`` columns;
@@ -314,10 +326,11 @@ def _plot_outliers(csv_path: str, column: str) -> str:
         f"Boxplot saved for column '{column}'.",
         draw,
         subfolder=subfolder,
+        output_dir=output_dir,
     )
 
 
-def _plot_skewness(csv_path: str, column: str) -> str:
+def _plot_skewness(csv_path: str, column: str, output_dir: str | None = None) -> str:
     """Draw a histogram for ``column`` and save it as a PNG.
 
     Only runs on ``numeric_measurement`` / ``numeric_discrete`` columns;
@@ -351,10 +364,11 @@ def _plot_skewness(csv_path: str, column: str) -> str:
         f"Histogram saved for column '{column}'.",
         draw,
         subfolder=subfolder,
+        output_dir=output_dir,
     )
 
 
-def _plot_imbalance(csv_path: str, target_column: str) -> str:
+def _plot_imbalance(csv_path: str, target_column: str, output_dir: str | None = None) -> str:
     """Draw a bar chart of class distribution for ``target_column``.
 
     Only runs for binary/multiclass targets. Continuous targets are skipped
@@ -420,10 +434,11 @@ def _plot_imbalance(csv_path: str, target_column: str) -> str:
         f"Class distribution saved for target '{target_column}'.",
         draw,
         subfolder=subfolder,
+        output_dir=output_dir,
     )
 
 
-def _plot_correlation(csv_path: str, columns: list[str] | None = None) -> str:
+def _plot_correlation(csv_path: str, columns: list[str] | None = None, output_dir: str | None = None) -> str:
     """Draw a heatmap of the correlation matrix for numeric columns.
 
     When ``columns`` is given, only those columns are plotted; otherwise all
@@ -488,7 +503,7 @@ def _plot_correlation(csv_path: str, columns: list[str] | None = None) -> str:
     fig.tight_layout()
 
     subfolder = _dataset_subfolder(csv_path)
-    plot_file = _save_fig(fig, "correlation_matrix.png", subfolder=subfolder)
+    plot_file = _save_fig(fig, "correlation_matrix.png", subfolder=subfolder, output_dir=output_dir)
     return _result(
         tool_name,
         plot_file,
@@ -581,13 +596,15 @@ def generate_plots(
     profile: dict | None,
     csv_path: str,
     target_column: str | None,
+    output_dir: str | None = None,
 ) -> PlotReport:
     """Deterministically choose and render plots from findings and profile.
 
     Never calls the LLM. Every failure becomes a skipped entry with a reason;
-    the function never raises. Inputs are plain data (findings, profile,
-    csv_path, target_column) so both the in-memory audit path and the run-id
-    path can call the same function.
+    the function never raises. When ``output_dir`` is given, plots are saved
+    there directly instead of under ``plots/<csv_stem>/``, which lets the API
+    isolate each run's plots. Inputs are plain data so both the in-memory audit
+    path and the run-id path can call the same function.
     """
     plots: list[str] = []
     skipped: list[dict[str, str | None]] = []
@@ -640,7 +657,10 @@ def generate_plots(
             )
             ordered = ordered[:MAX_PLOTS_PER_TYPE]
         for col in ordered:
-            result = _to_dict(tool_func.func(csv_path=csv_path, column=col))
+            call_kwargs = {"csv_path": csv_path, "column": col}
+            if output_dir is not None:
+                call_kwargs["output_dir"] = output_dir
+            result = _to_dict(tool_func.func(**call_kwargs))
             if result.get("status") == "ok":
                 plots.append(result["plot_file"])
             else:
@@ -658,11 +678,10 @@ def generate_plots(
         if is_classification:
             # Always produce the class-balance plot so even a balanced target
             # gets a class plot; run_plot_imbalance guards continuous targets.
-            result = _to_dict(
-                run_plot_imbalance.func(
-                    csv_path=csv_path, target_column=target_column
-                )
-            )
+            call_kwargs = {"csv_path": csv_path, "target_column": target_column}
+            if output_dir is not None:
+                call_kwargs["output_dir"] = output_dir
+            result = _to_dict(run_plot_imbalance.func(**call_kwargs))
             if result.get("status") == "ok":
                 plots.append(result["plot_file"])
                 skipped.append(
@@ -687,7 +706,10 @@ def generate_plots(
                     "reason": "imbalance plot skipped: continuous target.",
                 }
             )
-            result = _to_dict(_plot_target_distribution(csv_path, target_column))
+            call_kwargs = {"csv_path": csv_path, "target_column": target_column}
+            if output_dir is not None:
+                call_kwargs["output_dir"] = output_dir
+            result = _to_dict(_plot_target_distribution(**call_kwargs))
             if result.get("status") == "ok":
                 plots.append(result["plot_file"])
             else:
@@ -760,9 +782,10 @@ def generate_plots(
                     ),
                 }
             )
-        result = _to_dict(
-            run_plot_correlation.func(csv_path=csv_path, columns=selected)
-        )
+        call_kwargs = {"csv_path": csv_path, "columns": selected}
+        if output_dir is not None:
+            call_kwargs["output_dir"] = output_dir
+        result = _to_dict(run_plot_correlation.func(**call_kwargs))
         if result.get("status") == "ok":
             plots.append(result["plot_file"])
         else:
@@ -774,7 +797,10 @@ def generate_plots(
     missing_findings = [f for f in findings if f.get("check_name") == "missing_values"]
     missing_cols = _ordered_affected_columns(missing_findings)
     if missing_cols:
-        result = _to_dict(_plot_missing_values(csv_path, missing_cols))
+        call_kwargs = {"csv_path": csv_path, "columns": missing_cols}
+        if output_dir is not None:
+            call_kwargs["output_dir"] = output_dir
+        result = _to_dict(_plot_missing_values(**call_kwargs))
         if result.get("status") == "ok":
             plots.append(result["plot_file"])
         else:
@@ -797,7 +823,10 @@ def generate_plots(
         and df[col].nunique(dropna=True) <= MAX_CATEGORICAL_CARDINALITY
     ][:MAX_CATEGORICAL_PANELS]
     if categorical_cols:
-        result = _to_dict(_plot_categorical_counts(csv_path, categorical_cols))
+        call_kwargs = {"csv_path": csv_path, "columns": categorical_cols}
+        if output_dir is not None:
+            call_kwargs["output_dir"] = output_dir
+        result = _to_dict(_plot_categorical_counts(**call_kwargs))
         if result.get("status") == "ok":
             plots.append(result["plot_file"])
         else:
@@ -813,7 +842,7 @@ def generate_plots(
     return PlotReport(plots=plots, skipped=skipped)
 
 
-def _plot_missing_values(csv_path: str, columns: list[str]) -> str:
+def _plot_missing_values(csv_path: str, columns: list[str], output_dir: str | None = None) -> str:
     """Draw one combined bar chart of missing percentage per column."""
     tool_name = "run_plot_missing_values"
     try:
@@ -854,10 +883,11 @@ def _plot_missing_values(csv_path: str, columns: list[str]) -> str:
         "Missing value bar chart saved.",
         draw,
         subfolder=_dataset_subfolder(csv_path),
+        output_dir=output_dir,
     )
 
 
-def _plot_categorical_counts(csv_path: str, columns: list[str]) -> str:
+def _plot_categorical_counts(csv_path: str, columns: list[str], output_dir: str | None = None) -> str:
     """Draw one combined image with count bars for low-cardinality categorical columns."""
     tool_name = "run_plot_categorical_counts"
     try:
@@ -892,12 +922,12 @@ def _plot_categorical_counts(csv_path: str, columns: list[str]) -> str:
         return _result(tool_name, None, "skipped", [], "No plottable categorical columns.")
     fig.tight_layout()
     plot_file = _save_fig(
-        fig, "categorical_counts_combined.png", subfolder=_dataset_subfolder(csv_path)
+        fig, "categorical_counts_combined.png", subfolder=_dataset_subfolder(csv_path), output_dir=output_dir
     )
     return _result(tool_name, plot_file, "ok", plotted, "Categorical count chart saved.")
 
 
-def _plot_target_distribution(csv_path: str, target_column: str) -> str:
+def _plot_target_distribution(csv_path: str, target_column: str, output_dir: str | None = None) -> str:
     """Draw the target distribution: class counts for classification, histogram for continuous."""
     tool_name = "run_plot_target_distribution"
     series, stop = _get_column(tool_name, csv_path, target_column)
@@ -948,6 +978,7 @@ def _plot_target_distribution(csv_path: str, target_column: str) -> str:
         f"Target distribution saved for '{target_column}'.",
         draw,
         subfolder=subfolder,
+        output_dir=output_dir,
     )
 
 

@@ -17,22 +17,12 @@ pause. LLM settings come from `.env`.
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import sys
 import uuid
-from contextlib import contextmanager
 
-from langgraph.checkpoint.postgres import PostgresSaver
-
-try:
-    from langgraph.checkpoint.sqlite import SqliteSaver
-except ImportError:  # pragma: no cover - only when the sqlite dep is missing
-    SqliteSaver = None  # type: ignore[assignment]
-
-from src.config import get_settings
 from src.db.repository import ensure_schema, get_run, list_runs, save_run
-from src.graph.builder import build_agent_graph, build_graph
+from src.graph.audit_runner import build_check_params, run_audit, _parse_columns
 from src.tools.profiling import profile_dataset
 from src.workbench.visualizer.visualizer_tools import generate_plots
 
@@ -117,33 +107,6 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _parse_columns(values: list[str]) -> list[str]:
-    """Flatten repeatable/comma-separated CLI values into unique names."""
-    columns: list[str] = []
-    for value in values:
-        for part in value.split(","):
-            name = part.strip()
-            if name and name not in columns:
-                columns.append(name)
-    return columns
-
-
-def _build_check_params(args: argparse.Namespace) -> dict[str, dict]:
-    """Translate friendly CLI flags into the generic ``check_params`` dict."""
-    check_params: dict[str, dict] = {}
-
-    sensitive = _parse_columns(args.sensitive)
-    bias_params: dict[str, object] = {}
-    if sensitive:
-        bias_params["sensitive_columns"] = sensitive
-    if args.favorable:
-        bias_params["favorable_value"] = args.favorable
-    if bias_params:
-        check_params["bias"] = bias_params
-
-    return check_params
-
-
 def _build_semantic_overrides(args: argparse.Namespace) -> dict[str, str]:
     """Translate ``--semantic-override COLUMN=TYPE`` flags into a dict.
 
@@ -175,48 +138,6 @@ def _build_semantic_overrides(args: argparse.Namespace) -> dict[str, str]:
                 continue
             overrides[name] = new_type
     return overrides
-
-
-@contextmanager
-def _persisted_graph(use_agent: bool):
-    """Create the backend checkpointer, set up its tables, and build a graph.
-
-    Postgres -> ``PostgresSaver`` (existing behavior). SQLite -> ``SqliteSaver``.
-    Prints one line at startup naming the backend. A Postgres connection failure
-    is surfaced as a clear error asking to unset ``DATABASE_URL``; it never
-    silently falls back to SQLite.
-    """
-    settings = get_settings()
-    print(f"Using {settings.backend_name} backend.")
-
-    def _build(checkpointer):
-        return (
-            build_agent_graph(checkpointer=checkpointer)
-            if use_agent
-            else build_graph(checkpointer=checkpointer)
-        )
-
-    if settings.is_postgres:
-        try:
-            with PostgresSaver.from_conn_string(settings.postgres_conn_string) as saver:
-                saver.setup()  # safe to call repeatedly: only creates missing tables
-                yield _build(saver)
-        except Exception as exc:  # noqa: BLE001 - surface a clear, actionable error
-            print(
-                "Error: could not connect to PostgreSQL using DATABASE_URL.\n"
-                "Unset DATABASE_URL (or set DATABASE_PATH) to use the local "
-                "SQLite backend instead."
-            )
-            raise
-    else:
-        if SqliteSaver is None:
-            raise RuntimeError(
-                "SQLite backend selected but langgraph-checkpoint-sqlite is not "
-                "installed. Install it or set DATABASE_URL to use PostgreSQL."
-            )
-        with SqliteSaver.from_conn_string(settings.database_path) as saver:
-            saver.setup()
-            yield _build(saver)
 
 
 def _print_plot_report(report: object) -> None:
@@ -334,67 +255,35 @@ def main() -> None:
     # run_id doubles as the LangGraph thread_id, linking the two histories.
     run_id = args.thread_id or str(uuid.uuid4())
 
-    with _persisted_graph(args.agent) as graph:
-        config = {"configurable": {"thread_id": run_id}}
+    result = run_audit(
+        run_id=run_id,
+        csv_path=args.csv_path,
+        target_column=args.target,
+        check_params=build_check_params(_parse_columns(args.sensitive), args.favorable),
+        semantic_overrides=_build_semantic_overrides(args),
+        mode="agent" if args.agent else "deterministic",
+    )
 
-        state = graph.invoke(
-            {
-                "csv_path": args.csv_path,
-                "target_column": args.target,
-                "check_params": _build_check_params(args),
-                "semantic_overrides": _build_semantic_overrides(args),
-            },
-            config=config,
-        )
+    if result.error:
+        print(f"Error: {result.error}")
+        return
 
-        if state.get("error"):
-            print(f"Error: {state['error']}")
-            return
+    report_text = result.report_text
+    if report_text:
+        print(report_text)
+    else:
+        print("(no report produced)")
 
-        report = state.get("report")
-        report_text = state.get("report_text")
-
-        # PostgresSaver only stores graph state; findings go to the business tables too.
-        findings_raw = state.get("findings") or []
-        findings_data = [
-            {
-                "check_name": f["check_name"],
-                "severity": f["severity"],
-                "evidence": f["evidence"],
-                "affected_columns": f["affected_columns"],
-
-                "confidence": f["confidence"],
-            }
-            for f in findings_raw
-        ]
-
-        save_run(
-            run_id=run_id,
+    if _should_generate_plots(args):
+        # Generate plots from the returned audit results (no database read).
+        profile = result.profile or {}
+        report = generate_plots(
+            findings=result.findings,
+            profile=profile,
             csv_path=args.csv_path,
             target_column=args.target,
-            status="completed",
-            overall_severity=state.get("overall_severity"),
-            findings=findings_data,
-            report_json=json.loads(report) if report else None,
-            report_text=report_text,
         )
-
-        if report_text:
-            print(report_text)
-        else:
-            print("(no report produced)")
-
-        if _should_generate_plots(args):
-            # Generate plots from the in-memory audit results (no database
-            # read, no run id).
-            profile = state.get("profile") or {}
-            report = generate_plots(
-                findings=findings_raw,
-                profile=profile,
-                csv_path=args.csv_path,
-                target_column=args.target,
-            )
-            _print_plot_report(report)
+        _print_plot_report(report)
 
 
 if __name__ == "__main__":
