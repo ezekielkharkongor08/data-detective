@@ -94,15 +94,21 @@ def _make_runner(
     csv_path: str | None = None,
     target_column: str | None = None,
     profile: dict[str, Any] | None = None,
+    check_params: dict[str, dict] | None = None,
 ):
     """Create the function behind one generated tool.
 
     ``csv_path``/``target_column``/``profile`` may be injected from agent
     state; injected values win over LLM-supplied arguments so the model can
     only choose which tool to call and supply optional check parameters.
-    When nothing is injected, arguments fall back to the LLM-supplied values
-    (kept for direct tool use and backwards compatibility).
+    User-supplied per-check params (from graph state) win over LLM-supplied
+    values for the same parameter; LLM values fill in only where the user gave
+    none. When nothing is injected, arguments fall back to the LLM-supplied
+    values (kept for direct tool use and backwards compatibility).
     """
+    user_params = dict(
+        (check_params or {}).get(spec.name) or {}
+    )
 
     def _run(**kwargs: Any) -> str:
         # Build the same minimal state the registry expects, so tools and the
@@ -122,11 +128,14 @@ def _make_runner(
         for key in spec.required:
             if key not in state:
                 state[key] = kwargs.get(key)
-        params = {
-            key: kwargs[key]
-            for key in spec.optional
-            if kwargs.get(key) is not None
-        }
+        # User-supplied params win; LLM values fill only unset keys.
+        params = dict(user_params)
+        for key in spec.optional:
+            if key in user_params:
+                continue
+            value = kwargs.get(key)
+            if value is not None:
+                params[key] = value
         state["check_params"] = {spec.name: params}
 
         try:
@@ -145,13 +154,15 @@ def _make_tool(
     csv_path: str | None = None,
     target_column: str | None = None,
     profile: dict[str, Any] | None = None,
+    check_params: dict[str, dict] | None = None,
 ) -> StructuredTool:
     """Build one LangChain tool from a registered check.
 
     When ``csv_path``/``target_column``/``profile`` are injected they are
     bound into the runner and removed from the LLM-visible schema (``bind_io``
     true); otherwise the LLM supplies them via arguments (used by ``ALL_TOOLS``
-    and direct tool calls).
+    and direct tool calls). ``check_params`` carries caller-supplied per-check
+    params from graph state.
     """
     bind_io = csv_path is not None or target_column is not None or profile is not None
     description = spec.description or f"Run the {spec.name} check."
@@ -161,6 +172,7 @@ def _make_tool(
             csv_path=csv_path,
             target_column=target_column,
             profile=profile,
+            check_params=check_params,
         ),
         name=spec.agent_tool_name,
         description=(

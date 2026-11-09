@@ -19,7 +19,7 @@ from typing_extensions import TypedDict
 
 from src.graph.tools import ALL_TOOLS, _make_tool, _parse
 from src.schemas.finding import Finding
-from src.tools.checks import get_checks
+from src.tools.checks import error_finding, get_checks, info_note, run_check
 
 
 class AgentState(TypedDict):
@@ -126,12 +126,75 @@ def _collect_findings(messages: list) -> list[Finding]:
     return findings
 
 
+def _called_check_names(messages: list) -> set[str]:
+    """Return the agent-tool names the LLM actually invoked.
+
+    Read from ``ToolMessage.name`` in the message history, which the model
+    cannot forge, so this is the ground truth for which checks ran.
+    """
+    called: set[str] = set()
+    for message in messages:
+        if isinstance(message, ToolMessage) and message.name:
+            called.add(message.name)
+    return called
+
+
+def run_uncalled_agent_checks(
+    messages: list,
+    csv_path: str,
+    target_column: Optional[str],
+    profile: dict[str, Any],
+    check_params: Optional[dict[str, dict]] = None,
+) -> list[Finding]:
+    """Run every ``agent_tool`` check the agent never called, plus one note.
+
+    Each missing check runs through the normal ``run_check`` path with the
+    same state the agent tools use (csv_path, target_column, profile), plus
+    the caller's per-check params so user-supplied values (for example
+    ``--sensitive``/``--favorable``) are honored. The agent keeps full choice
+    of tools; this guard only guarantees completeness.
+
+    Returns the missing checks' findings and, when any were run, one INFO
+    finding naming them.
+    """
+    called = _called_check_names(messages)
+    missing = [
+        spec
+        for spec in get_checks(agent_tool=True)
+        if spec.agent_tool_name not in called
+    ]
+
+    findings: list[Finding] = []
+    state = {
+        "csv_path": csv_path,
+        "target_column": target_column,
+        "profile": profile,
+        "check_params": check_params or {},
+    }
+    for spec in missing:
+        try:
+            findings += run_check(spec, state)
+        except Exception as exc:  # noqa: BLE001 — one check must not stop the guard
+            findings.append(error_finding(spec.name, exc))
+
+    if missing:
+        names = ", ".join(spec.name for spec in missing)
+        findings.append(
+            info_note(
+                "agent",
+                f"Checks not selected by the agent were run automatically: {names}",
+            )
+        )
+    return findings
+
+
 def run_checks_with_agent(
     csv_path: str,
     target_column: Optional[str],
     profile: dict[str, Any],
     llm: BaseChatModel,
     tools: Optional[list] = None,
+    check_params: Optional[dict[str, dict]] = None,
 ) -> tuple[list[Finding], list]:
     """Run the ReAct agent on a dataset profile and return its findings.
 
@@ -141,7 +204,8 @@ def run_checks_with_agent(
     ``csv_path``/``target_column``/``profile`` are bound into each tool from
     agent state, so the LLM controls only which tool to call and optional
     check parameters; it cannot redirect a check to a different file or drop
-    the semantic profile.
+    the semantic profile. Caller-supplied ``check_params`` (from graph state)
+    are injected into the bound tools; user values win over LLM values.
     """
     if tools is None:
         from src.tools.checks import get_checks
@@ -152,6 +216,7 @@ def run_checks_with_agent(
                 csv_path=csv_path,
                 target_column=target_column,
                 profile=profile,
+                check_params=check_params,
             )
             for spec in get_checks(agent_tool=True)
         ]
@@ -178,4 +243,9 @@ def run_checks_with_agent(
     return _collect_findings(all_messages), all_messages
 
 
-__all__ = ["AgentState", "build_check_agent", "run_checks_with_agent"]
+__all__ = [
+    "AgentState",
+    "build_check_agent",
+    "run_checks_with_agent",
+    "run_uncalled_agent_checks",
+]

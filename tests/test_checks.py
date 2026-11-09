@@ -27,9 +27,16 @@ from src.tools.checks.registry import (
     _skip_note_message,
     _cap_names,
 )
+from langchain_core.messages import ToolMessage
+
+import src.graph.agent as agent_module
+import src.graph.tools as tools_module
+from src.graph.agent import run_uncalled_agent_checks
+from src.graph.nodes import make_agent_checks_node, router_node, deep_checks_node
+from src.graph.tools import _make_tool
+from src.tools.checks import get_checks
 from src.tools.profiling import profile_dataset
 from src.tools.target_type import is_classification_target
-from src.graph.nodes import router_node, deep_checks_node
 
 # ── shared dirty dataset ────────────────────────────────────────────────
 
@@ -897,4 +904,324 @@ def test_boolean_target_behaves_like_binary():
     assert "target" not in _cols(res, "outliers"), res
     assert "skewed_feat" in _cols(res, "skewness"), res
     assert "outlier_feat" in _cols(res, "outliers"), res
+
+
+# ── agent-mode completeness guard ──────────────────────────────────────
+
+ALL_AGENT_TOOL_NAMES = {spec.name for spec in get_checks(agent_tool=True)}
+
+
+def _write_csv(df: pd.DataFrame) -> str:
+    import os
+    import tempfile
+
+    path = os.path.join(tempfile.mkdtemp(), "guard.csv")
+    df.to_csv(path, index=False)
+    return path
+
+
+def _guard_state(csv_path: str, target_column: str = "target") -> dict:
+    profile = profile_dataset(csv_path, target_column=target_column)
+    return {
+        "csv_path": csv_path,
+        "target_column": target_column,
+        "profile": profile,
+        "check_params": {},
+    }
+
+
+def _stub_agent(called_tool_names, agent_findings=None):
+    """Stub ReAct agent that reports exactly these tools as called."""
+
+    def _stub(
+        csv_path,
+        target_column,
+        profile,
+        llm,
+        tools=None,
+        check_params=None,  # node now forwards caller check_params
+    ):  # noqa: ARG001
+        messages = [
+            ToolMessage(
+                content="[]",
+                tool_call_id=f"call-{i}",
+                name=name,
+            )
+            for i, name in enumerate(called_tool_names)
+        ]
+        return list(agent_findings or []), messages
+
+    return _stub
+
+
+def _guard_note(findings: list[dict]) -> str | None:
+    for f in findings:
+        if f.get("check_name") == "agent" and "run automatically" in f.get(
+            "evidence", ""
+        ):
+            return f.get("evidence", "")
+    return None
+
+
+_DIRTY_FOR_GUARD = pd.DataFrame(
+    {
+        "target": [0] * 90 + [1] * 10,
+        "row_id": [f"id-{i}" for i in range(100)],
+        "missing": [1, None] * 50,
+        "num": (["1", "2", "3", "4", "5", "x"] * 17)[:100],
+        "skewed": [1, 2, 3, 4, 1000] * 20,
+        "outlier_col": list(range(1, 95)) + [1000, 2000, 3000, 4000, 5000, 6000],
+        "leak": [0] * 90 + [1] * 10,  # exact copy of the target -> leakage
+        "group": ["A"] * 50 + ["B"] * 50,
+    }
+)
+
+
+def test_guard_runs_every_check_the_agent_skips(monkeypatch):
+    """Agent calls one tool; every other registered check still runs through
+    the guard, and the INFO note names exactly the missing checks."""
+    csv_path = _write_csv(_DIRTY_FOR_GUARD)
+    state = _guard_state(csv_path)
+    stub_finding = Finding(
+        check_name="duplicates",
+        severity=Severity.HIGH,
+        evidence="stub: duplicate rows found",
+        affected_columns=[],
+        confidence=1.0,
+    )
+    monkeypatch.setattr(
+        agent_module,
+        "run_checks_with_agent",
+        _stub_agent(["run_duplicates_check"], [stub_finding]),
+    )
+    result = make_agent_checks_node(None)(state)
+    assert result.get("error") is None, result.get("error")
+    findings = result.get("findings") or []
+    names = {f["check_name"] for f in findings}
+    # Every registered agent tool is represented (finding or its INFO note).
+    assert ALL_AGENT_TOOL_NAMES <= names, names
+    # The tool the agent called comes from the stub, not the guard.
+    assert any(
+        f["check_name"] == "duplicates" and "stub" in f["evidence"]
+        for f in findings
+    ), findings
+    # Exactly one guard note, listing precisely the checks the agent skipped.
+    note = _guard_note(findings)
+    assert note is not None, findings
+    reported = {part.strip() for part in note.split(":", 1)[1].split(",")}
+    assert reported == ALL_AGENT_TOOL_NAMES - {"duplicates"}, reported
+
+
+def test_guard_silent_when_agent_calls_all_tools(monkeypatch):
+    """Agent calls every tool: no guard note and no duplicate findings."""
+    csv_path = _write_csv(_DIRTY_FOR_GUARD)
+    state = _guard_state(csv_path)
+    all_tool_names = [
+        spec.agent_tool_name for spec in get_checks(agent_tool=True)
+    ]
+    stub_finding = Finding(
+        check_name="duplicates",
+        severity=Severity.HIGH,
+        evidence="stub: duplicate rows found",
+        affected_columns=[],
+        confidence=1.0,
+    )
+    monkeypatch.setattr(
+        agent_module,
+        "run_checks_with_agent",
+        _stub_agent(all_tool_names, [stub_finding]),
+    )
+    result = make_agent_checks_node(None)(state)
+    assert result.get("error") is None, result.get("error")
+    findings = result.get("findings") or []
+    assert not any(
+        "run automatically" in f.get("evidence", "") for f in findings
+    ), findings
+    assert len(findings) == 1
+    assert findings[0]["check_name"] == "duplicates"
+    assert findings[0]["evidence"] == "stub: duplicate rows found"
+
+
+def test_agent_exception_uses_existing_fallback(monkeypatch):
+    """Agent raises: the existing deterministic fallback still runs and the
+    guard never intercepts the exception."""
+    csv_path = _write_csv(_DIRTY_FOR_GUARD)
+    state = _guard_state(csv_path)
+
+    def _raises(*args, **kwargs):  # noqa: ARG001
+        raise RuntimeError("LLM is unreachable")
+
+    monkeypatch.setattr(agent_module, "run_checks_with_agent", _raises)
+    result = make_agent_checks_node(None)(state)
+    assert result.get("error") is None, result.get("error")
+    findings = result.get("findings") or []
+    names = {f["check_name"] for f in findings}
+    # Fallback checks ran (class imbalance is in the fallback group).
+    assert "class_imbalance" in names, names
+    # The fallback's own agent note is present.
+    assert any(f["check_name"] == "agent" for f in findings), names
+    # The guard did not run: no "run automatically" note, and bias stays out
+    # of the fallback group (fairness needs user-specified sensitive columns).
+    assert not any(
+        "run automatically" in f.get("evidence", "") for f in findings
+    ), findings
+    assert "bias" not in names, names
+
+
+def test_run_uncalled_agent_checks_lists_exactly_missing():
+    """The guard helper itself runs precisely the checks that were not
+    called and attaches one note naming them."""
+    csv_path = _write_csv(_DIRTY_FOR_GUARD)
+    state = _guard_state(csv_path)
+    messages = [
+        ToolMessage(
+            content="[]",
+            tool_call_id="call-1",
+            name="run_schema_check",
+        ),
+        ToolMessage(
+            content="[]",
+            tool_call_id="call-2",
+            name="run_missing_check",
+        ),
+    ]
+    findings = run_uncalled_agent_checks(
+        messages,
+        csv_path=csv_path,
+        target_column="target",
+        profile=state["profile"],
+    )
+    names = {f.check_name for f in findings}
+    expected = ALL_AGENT_TOOL_NAMES - {"schema", "missing_values"}
+    # Exactly one guard note, naming precisely the checks that were not
+    # called (duplicates finds nothing here because the fixture has no
+    # repeated rows, so it contributes no finding -- that is fine).
+    notes = [f for f in findings if f.check_name == "agent"]
+    assert len(notes) == 1, findings
+    reported = {part.strip() for part in notes[0].evidence.split(":", 1)[1].split(",")}
+    assert reported == expected, reported
+    # Every check the guard did run is represented by its own output.
+    assert names - {"agent"} <= expected, names
+
+
+# ── agent-mode check_params forwarding ─────────────────────────────────
+
+
+def _bound_bias_tool(csv_path, profile, check_params):
+    """Build a bound bias tool, the same way run_checks_with_agent does."""
+    spec = get_check("bias")
+    return _make_tool(
+        spec,
+        csv_path=csv_path,
+        target_column="target",
+        profile=profile,
+        check_params=check_params,
+    )
+
+
+def _capture_run_check(monkeypatch):
+    """Spy on tools.run_check and return the captured state/params."""
+    captured: dict = {}
+    original = tools_module.run_check
+
+    def spy(spec, state, run_fn=None):
+        captured["state"] = dict(state)
+        captured["params"] = dict(state.get("check_params") or {})
+        return original(spec, state)
+
+    monkeypatch.setattr(tools_module, "run_check", spy)
+    return captured
+
+
+def test_guard_forwards_check_params_to_missing_checks(monkeypatch):
+    """Guard-run bias check receives user-supplied sensitive_columns /
+    favorable_value and does not emit the "no sensitive columns" note."""
+    csv_path = _write_csv(_DIRTY_FOR_GUARD)
+    state = _guard_state(csv_path)
+    captured = {}
+    original = agent_module.run_check
+
+    def spy(spec, run_state, run_fn=None):
+        captured[spec.name] = (
+            run_state.get("check_params") or {}
+        ).get(spec.name, {})
+        return original(spec, run_state)
+
+    monkeypatch.setattr(agent_module, "run_check", spy)
+    messages = []  # agent called nothing, so every check is "missing"
+    findings = run_uncalled_agent_checks(
+        messages,
+        csv_path=csv_path,
+        target_column="target",
+        profile=state["profile"],
+        check_params={"bias": {"sensitive_columns": ["group"], "favorable_value": "1"}},
+    )
+    assert captured.get("bias") == {
+        "sensitive_columns": ["group"],
+        "favorable_value": "1",
+    }, captured
+    assert not any(
+        "no sensitive columns" in f.evidence
+        for f in findings
+        if f.check_name == "bias"
+    ), findings
+
+
+def test_bound_bias_tool_uses_injected_params(monkeypatch):
+    """Bound bias tool called with no params uses the injected user params."""
+    csv_path = _write_csv(_DIRTY_FOR_GUARD)
+    state = _guard_state(csv_path)
+    captured = _capture_run_check(monkeypatch)
+
+    tool = _bound_bias_tool(
+        csv_path,
+        state["profile"],
+        {"bias": {"sensitive_columns": ["group"], "favorable_value": "1"}},
+    )
+    tool.func()  # no LLM-supplied params
+    assert captured["params"] == {
+        "bias": {"sensitive_columns": ["group"], "favorable_value": "1"}
+    }, captured
+
+
+def test_bound_bias_tool_user_params_win_over_llm(monkeypatch):
+    """User-supplied params win over conflicting LLM-supplied params."""
+    csv_path = _write_csv(_DIRTY_FOR_GUARD)
+    state = _guard_state(csv_path)
+    captured = _capture_run_check(monkeypatch)
+
+    tool = _bound_bias_tool(
+        csv_path,
+        state["profile"],
+        {"bias": {"sensitive_columns": ["group"], "favorable_value": "1"}},
+    )
+    tool.func(sensitive_columns=["llm_col"], favorable_value="llm_val")
+    assert captured["params"] == {
+        "bias": {"sensitive_columns": ["group"], "favorable_value": "1"}
+    }, captured
+
+
+def test_bound_bias_tool_llm_fills_only_unstated_params(monkeypatch):
+    """LLM values fill in only where the user gave none."""
+    csv_path = _write_csv(_DIRTY_FOR_GUARD)
+    state = _guard_state(csv_path)
+    captured = _capture_run_check(monkeypatch)
+
+    tool = _bound_bias_tool(csv_path, state["profile"], {"bias": {"sensitive_columns": ["group"]}})
+    tool.func(favorable_value="1")
+    assert captured["params"] == {
+        "bias": {"sensitive_columns": ["group"], "favorable_value": "1"}
+    }, captured
+
+
+def test_bound_bias_tool_without_check_params_behavior_unchanged(monkeypatch):
+    """No check_params: bound bias tool called with no params still skips
+    because no user values can be injected (params stay empty)."""
+    csv_path = _write_csv(_DIRTY_FOR_GUARD)
+    state = _guard_state(csv_path)
+    captured = _capture_run_check(monkeypatch)
+
+    tool = _bound_bias_tool(csv_path, state["profile"], None)
+    tool.func()
+    assert captured["params"] == {"bias": {}}, captured
 

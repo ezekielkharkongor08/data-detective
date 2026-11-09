@@ -299,13 +299,33 @@ def make_agent_checks_node(llm: Any) -> Callable[[GraphState], GraphState]:
             return {"error": "No csv_path in state; cannot run checks."}
 
         profile = state.get("profile") or {}
+        # Honor user-supplied per-check params (for example --sensitive /
+        # --favorable) in both the agent's tool calls and the completeness
+        # guard, so CLI values are not silently dropped in agent mode.
+        check_params = state.get("check_params") or {}
         try:
-            from src.graph.agent import run_checks_with_agent
-            findings, _messages = run_checks_with_agent(
+            from src.graph.agent import (
+                run_checks_with_agent,
+                run_uncalled_agent_checks,
+            )
+            findings, messages = run_checks_with_agent(
                 csv_path=csv_path,
                 target_column=state.get("target_column"),
                 profile=profile,
                 llm=llm,
+                check_params=check_params,
+            )
+            # Guard: guarantee every registered check is represented, even
+            # when the model skips one (for example bias). Only checks the
+            # agent never called are run; the agent still chooses the tools.
+            # An agent exception propagates to the except block below, so the
+            # guard never intercepts it.
+            findings += run_uncalled_agent_checks(
+                messages,
+                csv_path=csv_path,
+                target_column=state.get("target_column"),
+                profile=profile,
+                check_params=check_params,
             )
             findings = [_finding_to_dict(f) for f in findings]
         except Exception as exc:  # noqa: BLE001 — LLM may be unreachable
