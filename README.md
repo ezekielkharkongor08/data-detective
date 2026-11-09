@@ -1,4 +1,4 @@
-# 🔍 Data Detective
+# Data Detective
 
 <p align="center">
   <strong>An evidence-based, privacy-first dataset audit agent powered by LangGraph, FastAPI, and Streamlit.</strong>
@@ -15,13 +15,13 @@
 
 ---
 
-## 💡 What is Data Detective?
+##  What is Data Detective?
 
 Before training machine learning models or deploying analytics pipelines, real-world data is often plagued with silent killers: **target leakage**, **demographic bias**, **severe class imbalance**, **extreme outliers**, and **schema anomalies**.
 
-**Data Detective** is an autonomous dataset auditor built on **LangGraph**. It analyzes tabular datasets through specialized statistical checks and produces an evidence-backed audit report with concrete next steps, paired with an interactive Web UI and REST API.
+**Data Detective** is an autonomous dataset auditor built on **LangGraph**. It analyzes tabular datasets through specialized statistical checks and produces an evidence-backed audit report with concrete next steps, paired with an interactive **Streamlit UI** and a **FastAPI backend**.
 
-### 🛡️ Core Design Principles
+### Core Design Principles
 
 1. **Privacy & Efficiency by Design:** The LLM **never** receives your raw CSV rows. It only analyzes a compact, token-efficient statistical profile (column types, distributions, null rates, and sample sketches).
 2. **Deterministic Calculations, Agentic Reasoning:** Python data tools (`pandas`, `scikit-learn`, `scipy`) compute statistical evidence. The LLM agent orchestrates what to inspect, validates hypotheses, and synthesizes findings.
@@ -32,32 +32,32 @@ Before training machine learning models or deploying analytics pipelines, real-w
 
 ---
 
-## 🏗️ Architecture
+## Architecture
 
 ```mermaid
 flowchart TD
-    CSV["📄 Raw CSV Upload"] --> Profile["⚙️ Ingestion & Semantic Profiling\n(Encoding fallback, delimiter detection & compact statistical digest)"]
-    
-    Profile --> Mode{"Select Mode"}
-    
-    %% Deterministic Path
-    Mode -->|"⚡ Deterministic (Default)"| DetSuite["Full Check Fan-Out\n(Runs all registered checks in parallel:\nmissing, duplicates, schema, imbalance, outliers, skew, IDs)"]
-    DetSuite --> DetMerge["Merge & Deduplicate Findings\n(SHA-256 evidence hashing)"]
-    DetMerge --> DetOut["📋 Raw Findings\n(Structured Pydantic findings only)"]
+    CSV["📄 User CSV Upload"] --> Load["⚙️ load_csv & profile_node\n(Encoding fallback, delimiter detection & semantic typing)"]
 
-    %% Agentic Path
-    Mode -->|"🤖 Agentic (--agent)"| AgentLoop["🧠 LLM ReAct Decision Loop\n(Inspects profile digest, reasons on distributions,\nand selectively invokes tools)"]
-    AgentLoop --> AgentGate{"Target Leakage\nSuspected?"}
-    AgentGate -->|Yes| AgentDeep["🔬 Deep Validation\n(5-fold CV baseline modeling)"]
-    AgentGate -->|No| AgentSynth["📝 LLM Synthesis\n(Executive summary, root causes & prioritized fixes)"]
-    AgentDeep --> AgentSynth
-    AgentSynth --> AgentOut["📋 Audit Report\n(Findings + Executive Synthesis)"]
+    Load --> FanOut
+    Load --> Digest
 
-    %% Convergence
-    DetOut --> Storage[("💾 Persistence & Checkpointing\nPostgreSQL or Local SQLite")]
-    AgentOut --> Storage
+    subgraph Deterministic ["⚡ Deterministic Pipeline (Default)"]
+        FanOut["Parallel Check Fan-Out\n(Executes all registered checks)"] --> Merge["merge_findings_node\n(SHA-256 deduplication)"]
+        Merge --> RepDet["report_node\n(Raw structured findings)"]
+    end
 
-    Storage -.->|"Optional: /audits/:id/plots"| Viz["📊 Visualizer Workbench\n(Auto-generated diagnostic charts)"]
+    subgraph Agentic ["🤖 Agentic Mode (--agent)"]
+        Digest["llm_context.py\n(Token-bounded profile digest)"] --> ReAct["agent_checks_node\n(LLM ReAct tool selection loop)"]
+        ReAct -->|Leakage suspected| DeepAgent["🔬 deep_checks_node\n(5-fold CV baseline modeling)"]
+        ReAct -->|No leakage| Synth["📝 synthesize_findings_node\n(LLM Executive Report & Fixes)"]
+        DeepAgent --> Synth
+        Synth --> RepAgent["report_node\n(Findings + Synthesis)"]
+    end
+
+    RepDet --> Storage[("💾 Persistence Layer\nPostgreSQL or Local SQLite")]
+    RepAgent --> Storage
+
+    Storage -.-> Viz["📊 Visualizer Workbench\n(Auto-generated diagnostic plots)"]
 ```
 
 ### Execution Modes
@@ -69,7 +69,7 @@ flowchart TD
 
 ---
 
-## 🔎 Audit Capabilities
+## Audit Capabilities
 
 | Audit Check | What It Detects | Supporting Evidence |
 | :--- | :--- | :--- |
@@ -84,7 +84,7 @@ flowchart TD
 
 ---
 
-## 🚀 Quick Start with Docker (Recommended)
+## Quick Start with Docker (Recommended)
 
 Run the full stack (**FastAPI Backend** + **Streamlit Web UI** + **Persistence**) in a single command with Docker Compose:
 
@@ -105,7 +105,7 @@ docker compose up
 - 📚 **FastAPI Swagger Docs:** [http://localhost:8000/docs](http://localhost:8000/docs)
 - 🩺 **Health Check:** [http://localhost:8000/health](http://localhost:8000/health)
 
-### 📥 Viewing & Exporting Audit Results
+### Viewing & Exporting Audit Results
 
 All audit runs, findings, and reports are saved automatically to SQLite (`/app/data/data_detective.db`).
 
@@ -126,7 +126,7 @@ docker compose --profile postgres up
 
 ---
 
-## 💻 Local Development Setup (Without Docker)
+## Local Development Setup (Without Docker)
 
 ### 1. Clone & Dependencies
 ```bash
@@ -184,16 +184,8 @@ streamlit run ui/app.py
 
 ---
 
-## 🧪 Testing
 
-Run unit tests and graph integration suites:
-```bash
-pytest tests/
-```
-
----
-
-## 🛠️ Tech Stack
+## Tech Stack
 
 - **Agent Orchestration:** LangGraph, LangChain
 - **LLM Integration:** Ollama (`llama3.1:8b`), LangChain-Ollama
