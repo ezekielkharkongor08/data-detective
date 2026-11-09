@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 from contextlib import contextmanager
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from langgraph.checkpoint.postgres import PostgresSaver
@@ -141,7 +142,21 @@ def run_audit(
 
     try:
         with _persisted_graph(use_agent) as graph:
-            config = {"configurable": {"thread_id": run_id}}
+            dataset_name = Path(csv_path).name
+            graph.name = f"{dataset_name} [{mode}]"
+            settings = get_settings()
+            config = {
+                "configurable": {"thread_id": run_id},
+                "run_name": f"{dataset_name} [{mode}]",
+                "tags": [mode, f"dataset:{dataset_name}", f"target:{target_column or 'none'}"],
+                "metadata": {
+                    "run_id": run_id,
+                    "dataset": dataset_name,
+                    "target_column": target_column,
+                    "mode": mode,
+                    "backend": settings.backend_name,
+                },
+            }
 
             state = graph.invoke(
                 {
@@ -194,6 +209,9 @@ def run_audit(
         for f in findings_raw
     ]
 
+    report_data = json.loads(report) if report else {}
+    report_data["mode"] = mode
+
     save_run(
         run_id=run_id,
         csv_path=csv_path,
@@ -201,7 +219,7 @@ def run_audit(
         status="completed",
         overall_severity=state.get("overall_severity"),
         findings=findings_data,
-        report_json=json.loads(report) if report else None,
+        report_json=report_data,
         report_text=report_text,
     )
 
@@ -211,7 +229,7 @@ def run_audit(
         mode=mode,
         overall_severity=state.get("overall_severity"),
         findings=findings_data,
-        report_json=json.loads(report) if report else None,
+        report_json=report_data,
         report_text=report_text,
         profile=state.get("profile"),
         error=None,

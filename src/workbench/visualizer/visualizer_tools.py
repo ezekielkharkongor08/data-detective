@@ -19,6 +19,7 @@ from typing import Any, Callable
 import numpy as np
 import pandas as pd
 from langchain_core.tools import StructuredTool
+from langsmith import traceable
 from matplotlib.figure import Figure
 
 from src.tools.csv_reader import read_csv_robust
@@ -591,6 +592,7 @@ def _is_constant(series: pd.Series) -> bool:
     return series.dropna().nunique() <= 1
 
 
+@traceable(name="generate_diagnostic_plots", run_type="tool")
 def generate_plots(
     findings: list[dict],
     profile: dict | None,

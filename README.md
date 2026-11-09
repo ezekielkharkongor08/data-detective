@@ -35,55 +35,62 @@ Before training machine learning models or deploying analytics pipelines, real-w
 ## 🏗️ Architecture
 
 ```
-                       ┌────────────────────────┐
-                       │   Uploaded CSV Data    │
-                       └───────────┬────────────┘
-                                   │
-               ┌───────────────────▼───────────────────┐
-               │    Profiling & Metadata Extraction    │
-               │  (Zero raw rows sent to the model)    │
-               └───────────────────┬───────────────────┘
-                                   │
-         ┌─────────────────────────┴─────────────────────────┐
-         │                                                   │
-┌────────▼────────────────────┐            ┌─────────────────▼─────────────────┐
-│     Agentic Workflow        │            │       Deterministic Pipeline      │
-│  (LangGraph + Ollama LLM)   │            │   (Standardized Full Check Suite) │
-└────────┬────────────────────┘            └─────────────────┬─────────────────┘
-         │                                                   │
-         └─────────────────────────┬─────────────────────────┘
-                                   │
-                     ┌─────────────▼─────────────┐
-                     │   Specialized Check Suite │
-                     │ • Missing Markers & Nulls │
-                     │ • Duplicate Detection     │
-                     │ • Target & Class Imbalance│
-                     │ • Target Leakage (Models) │
-                     │ • Fairness & Bias Checks  │
-                     │ • Outlier & Skewness Test │
-                     │ • ID-Like & Key Detectors │
-                     └─────────────┬─────────────┘
-                                   │
-            ┌──────────────────────┴──────────────────────┐
-            │                                             │
-┌───────────▼───────────┐                     ┌───────────▼───────────┐
-│  Evidence & Findings  │                     │ Visualizer Workbench  │
-│  (Structured Pydantic)│                     │ (Auto-generated Plots)│
-└───────────┬───────────┘                     └───────────┬───────────┘
-            │                                             │
-            └──────────────────────┬──────────────────────┘
-                                   │
-               ┌───────────────────▼───────────────────┐
-               │  Persistence Layer (SQLite / Postgres)│
-               └───────────────────┬───────────────────┘
-                                   │
-         ┌─────────────────────────┴─────────────────────────┐
-         │                                                   │
-┌────────▼────────┐                                 ┌────────▼────────┐
-│   FastAPI App   │                                 │  Streamlit UI   │
-│  (:8000/docs)   │                                 │     (:8501)     │
-└─────────────────┘                                 └─────────────────┘
+                     ┌─────────────────────────────────────────┐
+                     │          Raw CSV Dataset Upload         │
+                     └────────────────────┬────────────────────┘
+                                          │
+                     ┌────────────────────▼────────────────────┐
+                     │   Ingestion & Semantic Profiling Engine │
+                     │  • Resilient parsing (UTF-8, Latin-1)   │
+                     │  • Classifies 10 semantic column types  │
+                     │  • ZERO raw rows ever sent to the LLM   │
+                     └────────────────────┬────────────────────┘
+                                          │  Statistical Profile Digest
+                     ┌────────────────────┴────────────────────┐
+                     │                                         │
+        ┌────────────▼──────────────┐             ┌────────────▼──────────────┐
+        │   🤖 AGENTIC AUDIT MODE   │             │ ⚡ DETERMINISTIC PIPELINE │
+        │    (--agent / ReAct Loop) │             │    (Parallel Fan-Out)     │
+        │                           │             │                           │
+        │ 1. LLM inspects profile   │             │ Executes ALL check tools  │
+        │    digest & statistics    │             │ automatically in parallel:│
+        │ 2. Reasons on distributions│            │ • Missing & Sentinel Nulls│
+        │ 3. Selectively calls tools│             │ • Exact Duplicate Rows    │
+        │    with specific arguments│             │ • Schema Mismatches       │
+        │ 4. Accumulates findings   │             │ • Outliers & Skewness     │
+        └────────────┬──────────────┘             │ • Class Imbalance         │
+                     │                            │ • High-cardinality IDs    │
+                     │ (If target &               └────────────┬──────────────┘
+                     │  suspects present)                      │
+                     ▼                                         │
+        ┌───────────────────────────┐                          │
+        │   🔬 DEEP VALIDATION      │                          │
+        │ (5-Fold CV Leakage Models)│                          │
+        │ Verified if AUC > 0.85    │                          │
+        └────────────┬──────────────┘                          │
+                     │                                         │
+                     ▼                                         │
+        ┌───────────────────────────┐                          │
+        │ 📝 LLM SYNTHESIS REPORT   │                          │
+        │ Executive summary, root   │                          │
+        │ causes & prioritized fixes│                          │
+        └────────────┬──────────────┘                          │
+                     │                                         │
+                     │  Executive Report + Findings            │  Raw Findings
+                     └────────────────────┬────────────────────┘
+                                          │
+                     ┌────────────────────▼────────────────────┐
+                     │   Persistence & Tracing (LangSmith)     │
+                     │  PostgreSQL / Local SQLite + Checkpoints│
+                     └─────────────────────────────────────────┘
 ```
+
+### Execution Modes
+
+* **⚡ Deterministic Pipeline (Default):** Runs the full suite of specialized check tools simultaneously across all eligible columns. Fast, purely rule-based, and outputs structured findings directly with zero LLM overhead.
+* **🤖 Agentic Audit Mode (`--agent`):** The LLM receives only a compact, token-budgeted profile digest (column data types, null ratios, and summary statistics). It reasons over the dataset profile, dynamically decides which check tools to invoke with specific arguments, triggers deep 5-fold cross-validation when target leakage is suspected, and synthesizes all evidence into an executive report with prioritized fixes.
+
+> **Service & UI:** The core engine is served through a **FastAPI** backend and an interactive **Streamlit** dashboard. See [`ARCHITECTURE.md`](file:///e:/data-detective/ARCHITECTURE.md) for full REST API endpoint specifications.
 
 ---
 
@@ -139,55 +146,62 @@ docker compose --profile postgres up --build
 
 ## 💻 Local Development Setup (Without Docker)
 
-### 1. Create Virtual Environment
+### 1. Environment & Dependencies
 ```bash
-python -m venv myenv
-
-# Windows
-myenv\Scripts\activate
-# Linux/macOS
-source myenv/bin/activate
-
+python -m venv .venv
+source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
 ### 2. Configure Environment
-```bash
-cp .env.example .env
+Copy `.env.example` to `.env`. Data Detective works **out of the box with SQLite** without requiring PostgreSQL:
+```env
+LLM_PROVIDER=ollama
+LLM_MODEL=llama3.1:8b
+OLLAMA_BASE_URL=http://localhost:11434
+
+# Leave DATABASE_URL empty to default to local SQLite (./data_detective.db)
+DATABASE_URL=
 ```
-*(By default, SQLite is used automatically. Set `DATABASE_URL` in `.env` if you want PostgreSQL).*
 
-### 3. Run Services
+### 3. Run via CLI
 
-**Start FastAPI Backend:**
+**Deterministic Audit (Fast, rule-based):**
+```bash
+python main.py data/raw/adult.csv --target income
+```
+
+**Agentic Audit (LLM-orchestrated with synthesis report):**
+```bash
+python main.py data/raw/adult.csv --target income --agent
+```
+
+**Fairness & Demographic Bias Audit:**
+```bash
+python main.py data/raw/adult.csv --target income --sensitive race,sex --favorable >50K
+```
+
+**Launch Visualizer Workbench for a completed audit run:**
+```bash
+python main.py --workbench visualize --run-id <run-id>
+```
+
+### 4. Run Backend & Frontend Locally
+In one terminal, start the FastAPI server:
 ```bash
 uvicorn src.api.app:app --host 127.0.0.1 --port 8000 --reload
 ```
 
-**Start Streamlit Web UI:**
+In a second terminal, start the Streamlit UI:
 ```bash
 streamlit run ui/app.py
 ```
 
-**Run via CLI directly:**
-```bash
-# Deterministic Audit
-python main.py data/raw/adult.csv --target income
-
-# Agent Mode (Ollama LLM reasoning)
-python main.py data/raw/adult.csv --target income --agent
-
-# Fairness Audit
-python main.py data/raw/adult.csv --target income --sensitive race,sex --favorable ">50K"
-
-# List past runs
-python main.py --list
-```
-
 ---
 
-## 🧪 Running Tests
+## 🧪 Testing
 
+Run unit tests and graph integration suites:
 ```bash
 pytest tests/
 ```

@@ -1,173 +1,216 @@
-# Data Detective — Architectural Design & File Reference
+# Data Detective — System Architecture & Technical Reference
 
-Data Detective is a LangGraph agent that audits a CSV dataset (missing values, duplicates, imbalance, leakage, bias, outliers, skewness) and produces an evidence-based report before machine learning models are trained.
-
----
-
-## 1. Executive Summary & Honest Rating
-
-### **Overall Rating: 7.5 / 10** (Evaluated strictly on built features M0–M6: **9.0 / 10**)
-
-| Area | Score | Notes |
-| :--- | :---: | :--- |
-| **Agentic Architecture** | **9.5 / 10** | Strict separation: LLM never sees raw CSV data, state never holds DataFrames, token budgets are enforced with graceful degradation. |
-| **Data Science Robustness** | **9.0 / 10** | Semantic column classification, robust encoding/delimiter detection, and target leakage proof using 5-fold cross-validated ROC AUC and $R^2$. |
-| **Code Extensibility** | **9.5 / 10** | `@register_check` decorator pattern allows new checks to auto-register into CLI, parallel graph, ReAct agent tools, and prompts without touching core graph files. |
-| **Operational Usability** | **5.0 / 10** | `main.py` currently requires a live PostgreSQL instance running on `localhost:5432` to execute. Needs an in-memory/SQLite fallback. |
-| **Project Completeness** | **6.5 / 10** | M0–M6 and Visualizer Workbench are solid. M7 (FastAPI/Streamlit) is currently a 1-line stub (`src/api/__init__.py`). |
+Data Detective is an agentic data quality auditing system built with **LangGraph**, **FastAPI**, and **Streamlit**. It inspects tabular CSV datasets for machine learning readiness—identifying missing values, sentinel nulls, exact duplicates, schema corruptions, class imbalance, demographic bias, and feature leakage—and produces an evidence-based audit report before models are trained.
 
 ---
 
-## 2. System Workflow (Simple English)
+## 1. Core Architectural Invariants
 
-The audit workflow operates in two main execution modes, followed by an optional visualizer workbench:
+1. **Zero Raw Rows to LLM:** Raw CSV rows are never sent into language model prompts. The LLM receives only a compact, token-bounded statistical digest (column data types, null ratios, cardinality, and summary distributions).
+2. **State Never Holds DataFrames:** The LangGraph state dictionary (`GraphState`) holds file paths, metadata IDs, column profile dictionaries, and Pydantic findings. DataFrames are loaded within check tools and released immediately.
+3. **Pure Functional Calculators:** Python libraries (`pandas`, `scikit-learn`, `scipy`) perform all statistical and machine learning calculations. The LLM acts strictly as a reasoner, orchestrator, and synthesizer.
+4. **Empirical Evidence Required:** Speculative claims are disallowed. For instance, a target leakage claim is only confirmed if a 5-fold cross-validated baseline model achieves an $AUC > 0.85$ or $R^2 > 0.70$.
+5. **Deterministic Fallbacks:** The pipeline is resilient against LLM failures. If model reasoning, tool selection, or structured output parsing encounters an issue, the system gracefully degrades without crashing.
+
+---
+
+## 2. End-to-End System Workflow
+
+The architecture supports two distinct execution modes: a **Deterministic Pipeline** (runs all checks, outputs findings only) and an **Agentic Audit Mode** (LLM decides which tools to call, followed by an executive synthesis report).
 
 ```mermaid
 flowchart TD
-    CSV["User CSV File"] --> Load["load_csv_node\n(Encoding fallback & delimiter detection)"]
-    Load --> Profile["profile_node\n(Rule-based semantic classification & compact digest)"]
+    CSV["User CSV Upload / File"] --> Load["load_csv_node\n(Encoding fallback & delimiter detection)"]
+    Load --> Profile["profile_node\n(10 semantic column types & statistical digest)"]
     
     subgraph ExecutionModes ["Audit Execution Mode"]
         direction TB
-        Profile -->|Default: Deterministic| FanOut["Parallel Checks Fan-Out\n(missing, duplicates, schema, outliers, skewness, imbalance, id_like)"]
-        FanOut --> Merge["merge_findings_node\n(Deduplicated via SHA-256 evidence reducer)"]
-        Merge --> Router["router_node\n(Evaluates leakage suspicion)"]
         
-        Profile -->|Flag: --agent| Agent["agent_checks_node\n(ReAct Loop: LLM picks tools based on digest)"]
+        subgraph Deterministic ["⚡ Deterministic Pipeline (Default)"]
+            Profile --> FanOut["Parallel Checks Fan-Out\n(Executes ALL registered checks)"]
+            FanOut --> Merge["merge_findings_node\n(Deduplicated via SHA-256 evidence reducer)"]
+            Merge --> Router["router_node\n(Evaluates target leakage suspicion)"]
+            Router -->|Leakage suspected| DeepDet["deep_checks_node\n(5-fold CV baseline models)"]
+            Router -->|No leakage| RepDet["report_node\n(Raw structured findings)"]
+            DeepDet --> RepDet
+        end
+        
+        subgraph Agentic ["🤖 Agentic Mode (--agent)"]
+            Profile --> Digest["llm_context.py\n(Token-bounded profile digest)"]
+            Digest --> ReAct["agent_checks_node\n(ReAct Loop: LLM decides WHICH tools to call)"]
+            ReAct -->|Target & suspects detected| DeepAgent["deep_checks_node\n(5-fold CV baseline models)"]
+            ReAct -->|No leakage suspected| Synth["synthesize_findings_node\n(LLM Executive Report & Prioritized Fixes)"]
+            DeepAgent --> Synth
+            Synth --> RepAgent["report_node\n(AuditReport: Findings + Synthesis)"]
+        end
     end
     
-    Router --> Deep["deep_checks_node\n(5-fold CV Logistic/Linear Regression for leakage)"]
-    Agent --> Deep
+    RepDet --> Storage[("Persistence Layer\nPostgreSQL or Local SQLite")]
+    RepAgent --> Storage
     
-    Deep --> Synth["synthesize_findings_node\n(LLM executive summary with 3-tier fallback)"]
-    Synth --> Report["report_node\n(AuditReport serialization & CLI text rendering)"]
-    Report --> DB[("PostgreSQL\nPostgresSaver Checkpoints + Business Tables")]
-    
-    DB -.->|--visualize --run-id| Viz["Visualizer Workbench\n(ReAct Agent generates Matplotlib charts)"]
+    Storage -.->|/audits/:id/plots| Viz["Visualizer Workbench\n(ReAct Agent generates diagnostic charts)"]
 ```
 
-### The 5 Stages of an Audit:
-1. **Ingest & Profile (No LLM):** Read CSV with encoding fallback (`utf-8`, `latin-1`, `cp1252`) and delimiter detection. Classify columns into 10 semantic types (`numeric_measurement`, `binary`, `identifier`, `categorical`, etc.).
-2. **Audit Execution:**
-   - **Deterministic Mode:** LangGraph fans out to parallel check nodes, then merges findings using a SHA-256 deduplicating reducer.
-   - **Agent Mode (`--agent`):** Feeds the compact profile digest to Ollama. The LLM selects and calls check tools in a ReAct loop.
-3. **Deep Leakage Checks:** Trains 5-fold cross-validated baseline models on suspect columns to mathematically prove target leakage ($AUC > 0.85$ or $R^2 > 0.70$).
-4. **Synthesis & Reporting:** The LLM summarizes findings with dynamic next steps (with automatic fallback to plain-text or deterministic summaries if the model fails). The report is printed and saved to PostgreSQL.
-5. **Visualizer Workbench:** Running `--visualize` launches a specialized agent that creates Matplotlib plots (.png) for flagged issues (box plots for outliers, histograms for skewness, bar charts for imbalance).
+### The 5 Audit Stages:
+
+1. **Ingestion & Semantic Profiling:**
+   - Resilient CSV loading (`read_csv_robust`) with automatic encoding fallback (`utf-8`, `latin-1`, `cp1252`) and delimiter detection (`,`, `\t`, `;`, `|`).
+   - Rule-based classifier tags columns into 10 semantic types (`numeric_measurement`, `binary`, `identifier`, `categorical`, `text_unstructured`, etc.) with confidence scores and ambiguity flags.
+2. **Execution Strategy:**
+   - **Deterministic Mode:** LangGraph fans out to all registered check tools in parallel. Gathers raw findings using a SHA-256 deduplicating reducer.
+   - **Agent Mode:** The LLM inspects the compact profile digest, reasons about data distributions, and selectively calls check tools via a ReAct loop.
+3. **Deep Leakage Validation:**
+   - Suspect features undergo 5-fold cross-validated logistic regression or decision trees (`deep_checks_node`) to mathematically verify predictive leakage against the target.
+4. **Synthesis & Reporting:**
+   - **Deterministic:** Outputs raw structured `Finding` objects without an LLM report.
+   - **Agent Mode:** Invokes `synthesize_findings_node` where the LLM produces an executive summary, root-cause assessment, and prioritized remediation actions (backed by a 3-tier fallback).
+5. **Persistence & Checkpointing:**
+   - Saves run metadata, column profiles, findings, and reports into relational tables with automatic local SQLite fallback when PostgreSQL is unreachable.
 
 ---
 
-## 3. File Directory & Main Functions
+## 3. Agent Mode & Decision Mechanics
 
-### Core & Entry Point
-- **`main.py`**: CLI entry point.
-  - `main()`: Parses CLI arguments, ensures database tables, runs LangGraph audit, saves run data, or triggers visualizer.
-  - `_persisted_graph()`: Context manager attaching `PostgresSaver` checkpointer to the graph.
-  - `_build_check_params()` / `_build_semantic_overrides()`: Translates CLI flags into runtime check parameters.
-- **`src/config.py`**: Runtime configuration.
-  - `Settings`: Pydantic settings loading Ollama and PostgreSQL connection strings from `.env`.
-  - `get_settings()`: Cached settings singleton.
-- **`src/check_config.py`**: Central threshold storage.
-  - `CheckConfig`: Dataclasses holding thresholds for leakage (AUC/$R^2$), bias ($p$-value, disparate impact), outliers (IQR), skewness, missing percentages, and duplicate row ratios.
+In Agent Mode (`--agent` or `mode="agent"` via API), the LLM functions as an intelligent diagnostic auditor:
 
----
+```
+┌────────────────────────────────────────────────────────┐
+│                   Compact Profile Digest               │
+│ (Row count, column types, missing rates, sample stats) │
+└───────────────────────────┬────────────────────────────┘
+                            │
+                            ▼
+┌────────────────────────────────────────────────────────┐
+│                   ReAct Decision Loop                  │
+│                                                        │
+│ Thought: Column 'tenure' is numeric with high skewness.│
+│          Column 'churn' is binary target (imbalanced). │
+│          Column 'id' has 100% unique values.           │
+│                                                        │
+│ Action:  Call check_imbalance(target='churn')          │
+│ Observation: Minority class is 14.2% (HIGH severity)   │
+│                                                        │
+│ Action:  Call check_id_like(columns=['id'])            │
+│ Observation: Identifier risk confirmed                │
+│                                                        │
+│ Action:  Call check_leakage(suspects=['total_charges'])│
+│ ...                                                    │
+└───────────────────────────┬────────────────────────────┘
+                            │
+                            ▼
+┌────────────────────────────────────────────────────────┐
+│                  LLM Synthesis Report                  │
+│  • Executive summary of dataset readiness              │
+│  • Grouped findings by check name & severity           │
+│  • Actionable step-by-step remediation roadmap         │
+└────────────────────────────────────────────────────────┘
+```
 
-### Schemas (`src/schemas/`)
-- **`src/schemas/finding.py`**: Standardized audit problem schema.
-  - `Finding`: Pydantic container (`check_name`, `severity`, `evidence`, `affected_columns`, `confidence`).
-  - `Finding.__lt__()`: Orders findings by severity (`CRITICAL` > `HIGH` > `MEDIUM` > `LOW` > `INFO`).
-- **`src/schemas/report.py`**: Report schemas.
-  - `SynthesisResult`: Strict output structure enforced on the LLM summary.
-  - `AuditReport`: Complete data contract holding metadata, findings, column profiles, and sample rows.
-
----
-
-### Graph Architecture (`src/graph/`)
-- **`src/graph/state.py`**: LangGraph state.
-  - `GraphState`: TypedDict carrying IDs, paths, profile, and findings across nodes (never holds a DataFrame).
-- **`src/graph/reducers.py`**: State reducers.
-  - `merge_findings()`: Merges finding lists and prevents duplicates using SHA-256 evidence hashing.
-- **`src/graph/builder.py`**: State machine constructors.
-  - `build_graph()`: Builds deterministic parallel pipeline with conditional routing.
-  - `build_agent_graph()`: Builds LLM ReAct agent pipeline with synthesis.
-- **`src/graph/nodes.py`**: Core graph nodes.
-  - `load_csv_node()`: Validates CSV path.
-  - `profile_node()`: Computes dataset summary and column classifications.
-  - `router_node()`: Flags columns suspected of target leakage.
-  - `deep_checks_node()`: Runs cross-validated baseline models on suspect columns.
-  - `report_node()`: Serializes `AuditReport` to JSON and formatted text.
-- **`src/graph/agent.py`**: ReAct agent loop.
-  - `build_check_agent()`: Compiles LangGraph loop (`agent` <-> `tools`).
-  - `run_checks_with_agent()`: Executes the loop using the compact profile digest and aggregates findings.
-- **`src/graph/synthesis.py`**: Executive summary generation.
-  - `make_synthesize_findings_node()`: Produces synthesis node with 3-tier fallback (Structured JSON -> Plain Text -> Deterministic summary).
-  - `_group_findings()`: Groups findings by `(check_name, severity)` to prevent LLM duplication.
-- **`src/graph/tools.py`**: Dynamic LangChain tools.
-  - `ALL_TOOLS`: Auto-generated `StructuredTool` instances derived from the check registry.
-- **`src/graph/llm.py`**: Model factory.
-  - `get_llm()`: Builds `ChatOllama` instance from configuration.
-- **`src/graph/llm_context.py`**: Token budget protector.
-  - `build_llm_digest()`: Compresses column metadata into a bounded token budget (default 2000 tokens) with multi-stage degradation.
+* **Token Budget Protection (`src/graph/llm_context.py`):** Profile digests are bounded by token budgets (default 2,000 tokens) with multi-stage degradation to guarantee deterministic operation even on wide tables.
+* **Tool Registry Contract (`src/tools/checks/registry.py`):** Check tools are registered via `@register_check(name, semantic_types, requires_target)`. LangGraph dynamically exposes registered checks as LangChain tools with Pydantic argument schemas.
 
 ---
 
-### Data Tools & Check Registry (`src/tools/`)
-- **`src/tools/csv_reader.py`**: Resilient CSV loader.
-  - `read_csv_robust()`: Handles encodings (`utf-8`, `latin-1`, `cp1252`), strips BOMs, detects delimiters (`,`, `\t`, `;`, `|`), and caches parsed DataFrames.
-- **`src/tools/profiling.py`**: Profiling and semantic classifier.
-  - `profile_dataset()`: Extracts missing counts, statistics, and sample rows.
-  - `classify_columns()`: Classifies columns into 10 semantic types with confidence and ambiguity flags.
-- **`src/tools/missing_markers.py`**: Unified missing detector.
-  - `count_missing()`: Counts `NaN` values and string placeholders (`?`, `null`, `NA`, `-`, blanks).
-- **`src/tools/target_type.py`**: Target column inspection.
-  - `detect_target_type()`: Categorizes target as `binary`, `multiclass`, `continuous`, or `boolean`.
-- **`src/tools/checks/registry.py`**: Check registration and contract execution.
-  - `register_check()`: Decorator attaching check metadata and accepted semantic types.
-  - `run_check()`: Safe execution wrapper handling target-type and required-parameter gating.
+## 4. Service & Interface Architecture
+
+The application is structured as a decoupled multi-tier system:
+
+```
+┌───────────────────────────────────────────────────────┐
+│                 Streamlit Web UI                      │
+│                 (Port :8501, ui/app.py)               │
+│   • Dataset upload & configuration                    │
+│   • KPI summary cards & findings badges               │
+│   • Diagnostic chart viewer & report download (TXT/JSON)
+└───────────────────────────┬───────────────────────────┘
+                            │ HTTP (REST)
+                            ▼
+┌───────────────────────────────────────────────────────┐
+│                    FastAPI Backend                    │
+│               (Port :8000, src/api/app.py)            │
+│   • Async background task orchestration               │
+│   • Request validation & sanitization                 │
+│   • SQLite / PostgreSQL relational persistence        │
+└───────────────────────────┬───────────────────────────┘
+                            │ Invokes
+                            ▼
+┌───────────────────────────────────────────────────────┐
+│               LangGraph Audit Engine                  │
+│             (src/graph/audit_runner.py)               │
+│   • Graph state machine execution                     │
+│   • Checkpoint persistence & LangSmith tracing        │
+└───────────────────────────────────────────────────────┘
+```
+
+### FastAPI Endpoints:
+
+| Endpoint | Method | Purpose |
+| :--- | :---: | :--- |
+| `/health` | `GET` | Health probe verifying database connectivity (PostgreSQL / SQLite) and storage directories. |
+| `/audits` | `POST` | Accepts CSV file upload or URL, target column, audit mode (`deterministic` or `agent`), and dispatches an async background task. Returns `202 Accepted` with `run_id`. |
+| `/audits/{run_id}` | `GET` | Returns execution status (`running`, `completed`, `failed`), full findings, and synthesis report upon completion. |
+| `/audits` | `GET` | Returns historical audit summaries (dataset name, rows, columns, mode, findings count by severity). |
+| `/audits/{run_id}/plots` | `POST` | Dispatches the Visualizer Workbench to generate diagnostic Matplotlib charts for flagged findings. |
+| `/audits/{run_id}/plots/{filename}` | `GET` | Serves generated plot images (`.png`). |
 
 ---
 
-### Audit Checks (`src/tools/checks/`)
-- **`duplicates_check.py`**: Detects exact duplicate rows across the dataset.
-- **`missing_check.py`**: Flags columns exceeding missing value thresholds (LOW / HIGH / CRITICAL).
-- **`schema_check.py`**: Identifies numeric values improperly stored as string/object text.
-- **`id_like_check.py`**: Identifies non-target columns that are unique per row (identifier risk).
-- **`imbalance_check.py`**: Flags skewed classification targets (<10% or <30% minority share).
-- **`outlier_check.py`**: Detects numeric outliers using Interquartile Range (IQR).
-- **`skewness_check.py`**: Computes Fisher-Pearson skewness to flag distributional distortion.
-- **`leakage_check.py`**: Runs 5-fold cross-validated logistic/linear models to catch single-feature target leakage ($AUC > 0.85$ or $R^2 > 0.70$).
-- **`bias_check.py`**: Analyzes disparate impact and Chi-Square significance across user-defined demographic groups.
+## 5. Visualizer Workbench
+
+The Visualizer Workbench (`src/workbench/visualizer/`) generates targeted diagnostic visualizations for confirmed findings:
+
+* **Class Imbalance:** Target distribution bar charts highlighting majority/minority proportions.
+* **Skewness:** Feature distribution histograms with kernel density estimation and skewness indicators.
+* **Outliers:** Box-and-whisker plots depicting IQR fences and outlying observations.
+* **Feature Leakage:** Correlation matrices and predictive association heatmaps.
+
+Plots are saved under `plots/<run_id>/` and can be retrieved through the REST API or rendered in the Streamlit UI.
 
 ---
 
-### Database Layer (`src/db/`)
-- **`src/db/connection.py`**: SQLAlchemy engine and session factory (`init_db`, `get_db`).
-- **`src/db/models.py`**: Relational ORM models (`Dataset`, `AuditRun`, `Finding`, `Report`).
-- **`src/db/repository.py`**: CRUD layer (`save_run`, `list_runs`, `get_run`).
+## 6. Observability & Tracing (LangSmith)
+
+Full execution observability is provided through LangSmith integration:
+
+* **Entry Point Configuration:** `.env` variables (`LANGCHAIN_TRACING_V2=true`, `LANGCHAIN_API_KEY`, `LANGCHAIN_PROJECT`) are loaded into `os.environ` on startup across all entry points (`config.py`, `app.py`, `main.py`, `ui/app.py`).
+* **Granular Trace Spans:** Every core node (`load_csv_node`, `profile_node`, `check_*`, `router_node`, `deep_checks_node`, `synthesize_findings_node`, `report_node`) and tool (`generate_plots`) is decorated with `@traceable`.
+* **Identifiable Run Naming:** Each graph invocation is tagged with the dataset name and execution mode (e.g. `adult.csv [agent]` or `titanic.csv [deterministic]`), allowing instant filtering in the LangSmith dashboard.
 
 ---
 
-### Visualizer Workbench (`src/workbench/visualizer/`)
-- **`visualizer_graph.py`**: LangGraph builder for the charting ReAct agent.
-- **`visualizer_nodes.py`**: Nodes handling input routing and collecting generated plot paths.
-- **`visualizer_tools.py`**: Matplotlib plotting tools generating correlation heatmaps, class imbalance bar charts, outlier box plots, and skewness histograms.
+## 7. Directory & Module Reference
 
----
-
-### Evaluation (`eval/`)
-- **`eval/run_harness.py`**: Evaluation test harness.
-  - `run_harness()`: Audits registered datasets (`adult`, `telco`, `house`, `titanic`) in `eval/datasets.yaml` against expected labels in `eval/semantic_gold.yaml`, verifying consistency and deterministic behavior.
-
----
-
-## 4. Strengths & Known Rough Edges
-
-### Core Strengths
-1. **Strict Data Privacy:** Full CSVs are never sent to the LLM. Only compact, token-budgeted profile digests are passed.
-2. **Deterministic Fallbacks:** The pipeline never crashes on LLM timeout or invalid JSON; fallback summaries are automatically constructed.
-3. **Plug-and-Play Registry:** New checks can be added in a single file with `@register_check` without touching the graph builder or tool definitions.
-
-### Known Rough Edges
-1. **PostgreSQL Dependency:** `main.py` requires an active PostgreSQL connection at launch. Adding an in-memory/SQLite fallback when Postgres is offline will significantly improve developer experience.
-2. **Leakage Check Performance:** Running 5-fold cross-validation on every column sequentially can become slow on wide datasets.
-
+```
+data-detective/
+├── main.py                     # CLI entry point (audit, list runs, visualizer)
+├── ARCHITECTURE.md             # System architecture & technical reference
+├── README.md                   # Project overview, quickstart & API docs
+├── ui/
+│   └── app.py                  # Streamlit dashboard
+├── src/
+│   ├── config.py               # Pydantic Settings & environment loader (.env)
+│   ├── check_config.py         # Statistical thresholds & configuration
+│   ├── api/
+│   │   └── app.py              # FastAPI REST endpoints & background worker
+│   ├── db/
+│   │   ├── connection.py       # SQLAlchemy engine (Postgres + SQLite fallback)
+│   │   ├── models.py           # Relational ORM models (Run, Finding, Report)
+│   │   └── repository.py       # Persistence repository & data access methods
+│   ├── graph/
+│   │   ├── state.py            # GraphState definition (no DataFrames)
+│   │   ├── reducers.py         # SHA-256 evidence deduplicating reducer
+│   │   ├── nodes.py            # State machine graph nodes (@traceable)
+│   │   ├── builder.py          # Deterministic & Agent LangGraph builders
+│   │   ├── agent.py            # ReAct agent loop for tool selection
+│   │   ├── audit_runner.py     # Unified execution runner for CLI & API
+│   │   ├── synthesis.py        # Executive summary generation (3-tier fallback)
+│   │   └── llm_context.py      # Token-bounded profile digest generator
+│   ├── tools/
+│   │   ├── csv_reader.py       # Resilient CSV parser (encoding & delimiters)
+│   │   ├── profiling.py        # Semantic classification & statistical summary
+│   │   └── checks/             # Registered pure-Python audit check tools
+│   └── workbench/
+│       └── visualizer/         # ReAct charting agent & Matplotlib tools
+├── tests/                      # Automated test suite (checks, graph, API, visualizer)
+└── eval/                       # Evaluation harness & gold-standard benchmarks
+```

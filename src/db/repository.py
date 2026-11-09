@@ -25,7 +25,7 @@ def list_runs(limit: int = 50) -> list[dict[str, Any]]:
     with SessionLocal() as session:
         rows = (
             session.query(AuditRun)
-            .options(joinedload(AuditRun.dataset))
+            .options(joinedload(AuditRun.dataset), joinedload(AuditRun.report))
             .order_by(AuditRun.created_at.desc())
             .limit(limit)
             .all()
@@ -40,6 +40,7 @@ def list_runs(limit: int = 50) -> list[dict[str, Any]]:
                 "overall_severity": r.overall_severity,
                 "findings_count": r.findings_count,
                 "dataset_name": r.dataset.name if r.dataset else None,
+                "mode": (r.report.report_json or {}).get("mode", "deterministic") if r.report else "deterministic",
                 "created_at": r.created_at.isoformat() if r.created_at else None,
             }
             for r in rows
@@ -67,6 +68,7 @@ def get_run(run_id: str) -> dict[str, Any] | None:
             "overall_severity": run.overall_severity,
             "findings_count": run.findings_count,
             "dataset_name": run.dataset.name if run.dataset else None,
+            "mode": (run.report.report_json or {}).get("mode", "deterministic") if run.report else "deterministic",
             "created_at": run.created_at.isoformat() if run.created_at else None,
             "report_json": run.report.report_json if run.report else None,
             "report_text": run.report.report_text if run.report else None,

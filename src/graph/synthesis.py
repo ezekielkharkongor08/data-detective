@@ -10,6 +10,7 @@ import json
 from typing import Any, Callable
 
 from langchain_core.messages import HumanMessage, SystemMessage
+from langsmith import traceable
 
 from src.graph.llm_context import build_llm_digest, DEFAULT_BUDGET_TOKENS
 from src.graph.state import GraphState
@@ -140,6 +141,7 @@ def _compact_finding(f: dict) -> dict:
     }
 
 
+@traceable(name="build_llm_payload", run_type="chain")
 def _build_payload(profile: dict, findings: list) -> str:
     """Build the JSON payload sent to the LLM.
 
@@ -202,6 +204,7 @@ def _fallback_summary(profile: dict, findings: list, reason: str) -> str:
 def make_synthesize_findings_node(llm: Any) -> Callable[[GraphState], GraphState]:
     """Factory for the node that asks the LLM for a prioritized summary."""
 
+    @traceable(name="synthesize_findings", run_type="chain")
     def synthesize_findings_node(state: GraphState) -> GraphState:
         findings = state.get("findings") or []
         profile = state.get("profile") or {}

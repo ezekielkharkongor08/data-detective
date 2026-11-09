@@ -17,6 +17,10 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import urlopen
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 import pandas as pd
 from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -182,11 +186,13 @@ def _run_audit_background(
             _RUNS[run_id]["error_message"] = result.error
         else:
             _RUNS[run_id]["status"] = "completed"
+            _RUNS[run_id]["mode"] = mode
             _RUNS[run_id]["result"] = {
                 "overall_severity": result.overall_severity,
                 "findings": result.findings,
                 "report_json": result.report_json,
                 "report_text": result.report_text,
+                "mode": mode,
             }
 
 
@@ -202,6 +208,7 @@ def _get_run_anywhere(run_id: str) -> dict[str, Any] | None:
             "status": status_value,
             "csv_path": entry.get("csv_path"),
             "target_column": entry.get("target_column"),
+            "mode": entry.get("mode") or "deterministic",
         }
         if status_value == "completed":
             data = entry.get("result", {})
@@ -211,6 +218,7 @@ def _get_run_anywhere(run_id: str) -> dict[str, Any] | None:
                     "findings": data.get("findings"),
                     "report_json": data.get("report_json"),
                     "report_text": data.get("report_text"),
+                    "mode": data.get("mode") or entry.get("mode") or "deterministic",
                 }
             )
         elif status_value == "failed":
@@ -229,6 +237,7 @@ def _get_run_anywhere(run_id: str) -> dict[str, Any] | None:
         "findings": (run.get("report_json") or {}).get("findings"),
         "report_json": run.get("report_json"),
         "report_text": run.get("report_text"),
+        "mode": run.get("mode") or (run.get("report_json") or {}).get("mode") or "deterministic",
     }
 
 
@@ -244,6 +253,7 @@ class AuditStatus(BaseModel):
     status: str
     csv_path: str | None = None
     target_column: str | None = None
+    mode: str | None = None
     error_message: str | None = None
     overall_severity: str | None = None
     findings: list[dict[str, Any]] | None = None
@@ -256,6 +266,7 @@ class RunSummary(BaseModel):
     status: str
     csv_path: str | None = None
     target_column: str | None = None
+    mode: str | None = None
     overall_severity: str | None = None
     findings_count: int = 0
     created_at: str | None = None
@@ -336,6 +347,7 @@ def start_audit(
             "status": "queued",
             "csv_path": csv_path,
             "target_column": target,
+            "mode": mode,
         }
 
     background_tasks.add_task(
@@ -372,6 +384,7 @@ def list_audits() -> list[RunSummary]:
                 status=r["status"],
                 csv_path=r.get("csv_path"),
                 target_column=r.get("target_column"),
+                mode=r.get("mode") or "deterministic",
                 overall_severity=r.get("overall_severity"),
                 findings_count=r.get("findings_count", 0),
                 created_at=r.get("created_at"),
@@ -387,6 +400,7 @@ def list_audits() -> list[RunSummary]:
                     status=entry["status"],
                     csv_path=entry.get("csv_path"),
                     target_column=entry.get("target_column"),
+                    mode=entry.get("mode") or "deterministic",
                 )
             )
     summaries.sort(key=lambda s: s.created_at or "", reverse=True)

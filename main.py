@@ -21,6 +21,10 @@ import os
 import sys
 import uuid
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 from src.db.repository import ensure_schema, get_run, list_runs, save_run
 from src.graph.audit_runner import build_check_params, run_audit, _parse_columns
 from src.tools.profiling import profile_dataset

@@ -26,9 +26,10 @@ _is_sqlite = _settings.database_url.startswith("sqlite")
 
 _engine_kwargs: dict = {"pool_pre_ping": True}
 if _is_sqlite:
-    # SQLite needs check_same_thread=False so the checkpointer and the app can
-    # share the connection across threads.
     _engine_kwargs["connect_args"] = {"check_same_thread": False}
+else:
+    # Fail fast on connection errors to prevent API read timeouts.
+    _engine_kwargs["connect_args"] = {"connect_timeout": 3}
 
 
 def _make_engine() -> Engine:
@@ -60,19 +61,20 @@ def get_db() -> Generator[Session, None, None]:
 
 
 def create_database_if_not_exists() -> None:
-    """Create the target database if it does not exist (Postgres only).
-
-    For SQLite the database file is created automatically on first connect, so
-    this is a no-op. SQLAlchemy cannot create a database while connected to it,
-    so Postgres connects to the ``postgres`` admin database first.
-    """
+    """Create the target database if it does not exist (Postgres only)."""
+    current_url = getattr(engine, "url", None)
+    if current_url and "sqlite" in current_url.drivername:
+        return
     if _is_sqlite:
         return
     admin_connection_string = (
         f"postgresql+psycopg://{_settings.postgres_user}:{_settings.postgres_password}"
-        f"@{_settings.postgres_host}:{_settings.postgres_port}/postgres"
+        f"@{_settings.postgres_host}:{_settings.postgres_port}/postgres?connect_timeout=2"
     )
-    admin_engine = create_engine(admin_connection_string, isolation_level="AUTOCOMMIT")
+    admin_engine = create_engine(
+        admin_connection_string,
+        isolation_level="AUTOCOMMIT",
+    )
     try:
         with admin_engine.connect() as conn:
             result = conn.execute(
@@ -86,13 +88,12 @@ def create_database_if_not_exists() -> None:
 
 
 def init_db() -> None:
-    """Create all tables defined on ``Base``.
-
-    Safe to call on startup; tables that already exist are left untouched.
-    Automatically creates the target database if it does not exist (Postgres).
-    """
-    create_database_if_not_exists()
-    Base.metadata.create_all(bind=engine)
+    """Create all tables defined on ``Base``."""
+    try:
+        create_database_if_not_exists()
+        Base.metadata.create_all(bind=engine)
+    except Exception:  # noqa: BLE001 - database may be unreachable at startup
+        pass
 
 
 __all__ = ["Base", "engine", "SessionLocal", "get_db", "init_db", "create_database_if_not_exists"]

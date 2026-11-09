@@ -13,6 +13,10 @@ import time
 from pathlib import Path
 from typing import Any
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 import pandas as pd
 import requests
 import streamlit as st
@@ -395,20 +399,21 @@ def render_past_audits() -> None:
     rows: list[dict[str, Any]] = []
     for r in runs:
         csv_path = r.get("csv_path") or ""
-        file_name = csv_path.split("/")[-1] if csv_path else ""
+        file_name = Path(csv_path).name if csv_path else "unknown"
+        mode_val = r.get("mode") or "deterministic"
         rows.append(
             {
                 "Run ID": r.get("run_id"),
                 "File": file_name,
                 "Target": r.get("target_column") or "",
                 "Status": r.get("status"),
-                "Mode": r.get("mode") or "",
+                "Mode": mode_val,
                 "Created": r.get("created_at") or "",
             }
         )
     st.dataframe(rows, use_container_width=True, hide_index=True)
     options = {
-        f"{r.get('run_id')} — {r.get('status')}": r.get("run_id") for r in runs
+        f"{r.get('run_id')} — {r.get('status')} ({r.get('mode') or 'deterministic'})": r.get("run_id") for r in runs
     }
     choice = st.selectbox("Open a past run", options=list(options.keys()), key="past_run_select")
     if choice and st.button("View run", key="view_past_run"):

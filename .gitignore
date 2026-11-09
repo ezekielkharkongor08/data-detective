@@ -29,3 +29,6 @@ Thumbs.db
 
 docs/
 AGENTS.md
+
+.gitignore
+.dockerignore

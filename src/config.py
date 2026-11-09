@@ -5,9 +5,13 @@ to `.env` and adjust the values.
 """
 
 from functools import lru_cache
-from pydantic import model_validator
 
+from dotenv import load_dotenv
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Load .env into os.environ so LangSmith and other external tools detect configuration.
+load_dotenv()
 
 
 class Settings(BaseSettings):

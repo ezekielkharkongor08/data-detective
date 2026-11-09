@@ -4,6 +4,7 @@ Builds the chat model from settings in `.env`.
 """
 
 from functools import lru_cache
+from typing import Any
 
 from langchain_core.language_models import BaseChatModel
 

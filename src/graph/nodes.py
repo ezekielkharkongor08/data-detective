@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from langchain_core.messages import HumanMessage, SystemMessage
+from langsmith import traceable
 
 from src.graph.synthesis import make_synthesize_findings_node
 from src.graph.state import GraphState
@@ -32,6 +33,7 @@ from src.tools.csv_reader import read_csv_robust
 from src.tools.profiling import get_semantic_lookup, profile_dataset
 
 
+@traceable(name="load_csv", run_type="tool")
 def load_csv_node(state: GraphState) -> GraphState:
     """Validate the CSV file exists and record its path + dataset id."""
     csv_path = state.get("csv_path")
@@ -109,11 +111,8 @@ def make_check_node(
     spec: CheckSpec,
     run_fn: Callable[..., list[Finding]] | None = None,
 ) -> Callable[[GraphState], dict]:
-    """Factory that wraps a registered check into a LangGraph node.
-
-    ``run_fn`` lets tests patch ``builder.CHECKS`` without losing the
-    registry metadata (required inputs, params, target gating).
-    """
+    """Wrap a registered check into a traceable LangGraph node."""
+    @traceable(name=f"check_{spec.name}", run_type="tool")
     def _node(state: GraphState) -> dict:
         return _run_registered_check(spec, state, run_fn=run_fn)
     _node.__name__ = f"check_{spec.name}"
@@ -178,15 +177,9 @@ def _eligible_suspect_columns(
     return capped, total_eligible
 
 
+@traceable(name="router", run_type="chain")
 def router_node(state: GraphState) -> GraphState:
-    """Decide whether to run deep leakage checks.
-
-    When a target column exists, every eligible feature column is treated
-    as a leakage suspect (excluded: target, identifier, constant, text,
-    high-uniqueness). ``leakage_suspected`` is True when at least one
-    eligible column exists. ``id_like`` and ``schema`` findings are no
-    longer triggers -- an identifier is not leakage.
-    """
+    """Decide whether to run deep leakage checks on eligible feature columns."""
     csv_path = state.get("csv_path")
     target_column = state.get("target_column")
     profile = state.get("profile") or {}
@@ -208,8 +201,6 @@ def router_node(state: GraphState) -> GraphState:
             )
         )
 
-    # State field names kept for API compatibility with the agent path and
-    # the checkpointer.
     return {
         "leakage_suspected": len(suspect_columns) > 0,
         "suspect_columns": suspect_columns,
@@ -217,10 +208,9 @@ def router_node(state: GraphState) -> GraphState:
     }
 
 
+@traceable(name="deep_leakage_checks", run_type="tool")
 def deep_checks_node(state: GraphState) -> GraphState:
-    """Run the deep leakage check on non-target columns (leakage suspected
-    only); results go to ``deep_check_results`` and their findings are merged.
-    """
+    """Run deep leakage check on non-target columns when suspected."""
     csv_path = state.get("csv_path")
     target_column = state.get("target_column")
 
@@ -438,6 +428,7 @@ def render_text_report(report: AuditReport) -> str:
     return "\n".join(lines)
 
 
+@traceable(name="profile_dataset", run_type="tool")
 def profile_node(state: GraphState) -> GraphState:
     """Build the compact profile from the CSV on disk."""
     csv_path = state.get("csv_path")
@@ -457,13 +448,9 @@ def profile_node(state: GraphState) -> GraphState:
     return {"profile": profile, "error": None}
 
 
+@traceable(name="generate_report", run_type="chain")
 def report_node(state: GraphState) -> GraphState:
-    """Render the profile + merged findings + deep check results as a report.
-
-    Builds one :class:`AuditReport` — the source of truth — storing its JSON
-    (``state["report"]``) and plain-text rendering (``state["report_text"]``).
-    Even with no profile, renders a minimal report so the error surfaces.
-    """
+    """Render the profile, findings, and results into a structured AuditReport."""
     profile = state.get("profile")
     dataset_id = state.get("dataset_id", "unknown")
     error = state.get("error")

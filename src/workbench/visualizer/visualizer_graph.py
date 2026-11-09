@@ -56,7 +56,9 @@ def build_visualizer_graph(llm: Any | None = None, checkpointer=None):
     builder.add_edge("tools", "agent")
     builder.add_edge("collect", END)
  
-    return builder.compile(checkpointer=checkpointer)
+    graph = builder.compile(checkpointer=checkpointer)
+    graph.name = "Visualizer Workbench"
+    return graph
  
  
 __all__ = ["build_visualizer_graph"]
