@@ -7,7 +7,7 @@ wheels/
 *.egg-info
 
 # Virtual environments
-myenv
+myenv/
 
 # Secrets / local config (never commit .env)
 .env
@@ -15,3 +15,5 @@ myenv
 AGENTS.md
 CODEBASE_AUDIT_REPORT.md
 DATA_DETECTIVE_PROJECT_BRIEF.md
+
+plots/

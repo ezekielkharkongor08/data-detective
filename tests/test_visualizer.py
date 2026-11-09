@@ -17,10 +17,12 @@ import sys
 import tempfile
 from io import StringIO
 
+import numpy as np
 import pandas as pd
 import pytest
 
 import src.workbench.visualizer.visualizer_tools as vt
+from src.tools.profiling import profile_dataset
 from src.workbench.visualizer.visualizer_tools import (
     generate_plots,
     PlotReport,
@@ -823,3 +825,131 @@ def test_generate_plots_receives_in_memory_inputs(tmp_path, monkeypatch):
     assert isinstance(call_args["profile"], dict)
     assert call_args["csv_path"] == real_csv
     assert call_args["target_column"] == "target"
+
+
+# ── correlation heatmap column selection ────────────────────────────
+
+
+def _titanic_like_frame() -> pd.DataFrame:
+    """Titanic-like frame: numeric features, numeric 0/1 target, identifier,
+    text and datetime columns (>= MIN_ROWS so the classifier is confident)."""
+    n = 100
+    base = {
+        "Pclass": [1, 1, 1, 1, 2, 2, 2, 2, 3, 3] * 10,
+        "Age": [22.0, 38.0, 26.0, 35.0, 35.0, 27.0, 14.0, 4.0, 58.0, 20.0] * 10,
+        "Fare": [7.25, 71.28, 7.92, 53.1, 8.05, 8.46, 15.5, 5.0, 31.0, 16.7] * 10,
+        "SibSp": [1, 1, 0, 0, 0, 0, 0, 1, 0, 0] * 10,
+        "Parch": [0, 1, 0, 0, 0, 1, 0, 0, 0, 1] * 10,
+        "target": [0, 1, 1, 1, 0, 0, 0, 0, 1, 1] * 10,
+        "Name": ["n%s" % i for i in range(n)],
+    }
+    return pd.DataFrame(
+        {"PassengerId": list(range(1, n + 1)), **base, "date": pd.date_range("2020-01-01", periods=n)}
+    )
+
+
+def _capture_correlation_columns(monkeypatch):
+    """Spy on run_plot_correlation.func and return the columns it receives."""
+    captured: dict = {}
+
+    def spy(csv_path, columns=None):
+        captured["columns"] = list(columns) if columns is not None else None
+        return vt._result("run_plot_correlation", "fake.png", "ok", columns or [], "x")
+
+    monkeypatch.setattr(vt.run_plot_correlation, "func", spy)
+    return captured
+
+
+def test_correlation_heatmap_includes_numeric_target_first(
+    tmp_path, monkeypatch
+):
+    """Heatmap contains Age, Fare, Pclass, SibSp, Parch and the target
+    (first), but not the identifier; text/datetime columns are excluded."""
+    _set_plots_dir(monkeypatch, tmp_path)
+    df = _titanic_like_frame()
+    csv_path = _write_csv(df, tmp_path)
+    profile = profile_dataset(csv_path, target_column="target")
+    captured = _capture_correlation_columns(monkeypatch)
+    report = generate_plots([], profile, csv_path, "target")
+    cols = captured["columns"]
+    assert cols is not None, cols
+    assert cols[0] == "target", cols
+    for col in ("Age", "Fare", "Pclass", "SibSp", "Parch"):
+        assert col in cols, cols
+    assert "PassengerId" not in cols, cols
+    assert "Name" not in cols, cols
+    assert "date" not in cols, cols
+    assert report.plots, report.skipped
+
+
+def test_correlation_heatmap_text_or_datetime_excluded(tmp_path, monkeypatch):
+    """A text column and a datetime column are never in the heatmap."""
+    _set_plots_dir(monkeypatch, tmp_path)
+    df = pd.DataFrame(
+        {
+            "target": [0, 1] * 50,
+            "num1": [float(i) for i in range(100)],
+            "text": ["t%s" % (i % 5) for i in range(100)],
+            "stamp": pd.date_range("2020-01-01", periods=100),
+        }
+    )
+    csv_path = _write_csv(df, tmp_path)
+    profile = profile_dataset(csv_path, target_column="target")
+    captured = _capture_correlation_columns(monkeypatch)
+    generate_plots([], profile, csv_path, "target")
+    cols = captured["columns"]
+    assert cols is not None, cols
+    assert cols[0] == "target", cols
+    assert "num1" in cols, cols
+    assert "text" not in cols, cols
+    assert "stamp" not in cols, cols
+
+
+def test_correlation_heatmap_skip_when_fewer_than_two(tmp_path, monkeypatch):
+    """Fewer than two usable numeric columns gives a skip reason."""
+    _set_plots_dir(monkeypatch, tmp_path)
+    df = pd.DataFrame({"target": [0, 1] * 50, "text": ["x"] * 100})
+    csv_path = _write_csv(df, tmp_path)
+    profile = profile_dataset(csv_path, target_column="target")
+    captured = _capture_correlation_columns(monkeypatch)
+    report = generate_plots([], profile, csv_path, "target")
+    # The correlation heatmap is not produced (tool not called due to skip);
+    # only the imbalance plot may be present for a classification target.
+    assert captured.get("columns") is None, captured
+    assert any(
+        "two numeric columns" in r for r in _skipped_reasons(report)
+    ), _skipped_reasons(report)
+
+
+def test_correlation_cap_ranks_by_correlation_not_variance(
+    tmp_path, monkeypatch
+):
+    """More columns than the cap keeps the target plus exactly the cap,
+    ranked by correlation with the target, not by raw variance. A
+    large-scale noise column (highest variance, low correlation) is dropped."""
+    _set_plots_dir(monkeypatch, tmp_path)
+    n = 200
+    rng = np.random.RandomState(42)
+    target = rng.randint(0, 2, size=n)
+    # Features positively correlated with the target.
+    features = {
+        "feat%s" % i: (target + 0.1 * rng.standard_normal(n)).tolist()
+        for i in range(33)
+    }
+    # Noise column with the highest variance but essentially no correlation.
+    noise = (1e6 * rng.standard_normal(n)).tolist()
+    df = pd.DataFrame(
+        {"target": target.tolist(), "noise": noise, **features}
+    )
+    csv_path = _write_csv(df, tmp_path)
+    profile = profile_dataset(csv_path, target_column="target")
+    captured = _capture_correlation_columns(monkeypatch)
+    report = generate_plots([], profile, csv_path, "target")
+    cols = captured["columns"]
+    assert cols is not None, cols
+    assert cols[0] == "target", cols
+    # noise has the highest variance but is dropped (low correlation).
+    assert "noise" not in cols, cols
+    # target plus exactly MAX_CORRELATION_COLUMNS columns total.
+    assert len(cols) == vt.MAX_CORRELATION_COLUMNS, cols
+    assert any("capped at" in r for r in _skipped_reasons(report)), _skipped_reasons(report)

@@ -571,6 +571,11 @@ def _ordered_affected_columns(findings: list[dict]) -> list[str]:
     return ordered
 
 
+def _is_constant(series: pd.Series) -> bool:
+    """Return True when the series has a single distinct non-null value."""
+    return series.dropna().nunique() <= 1
+
+
 def generate_plots(
     findings: list[dict],
     profile: dict | None,
@@ -696,26 +701,61 @@ def generate_plots(
                 )
 
     # ── correlation heatmap ──
-    numeric_cols = [
+    # Start from columns with a pandas numeric dtype; drop constant columns so
+    # they cannot produce NaN rows in the heatmap.
+    candidate_cols = [
         col
-        for col, sem in lookup.items()
-        if sem.get("type") in ("numeric_measurement", "numeric_discrete")
+        for col in df.columns
+        if pd.api.types.is_numeric_dtype(df[col])
+        and not _is_constant(df[col])
     ]
-    if len(numeric_cols) >= 2:
-        selected = numeric_cols
-        if len(numeric_cols) > MAX_CORRELATION_COLUMNS:
-            # Choose the highest-variance columns so the heatmap stays
-            # readable on wide datasets; note how many were left out.
-            variances = df[numeric_cols].var(numeric_only=True).sort_values(
-                ascending=False
+    # Exclude only identifier / constant / datetime semantic types; unknown or
+    # ambiguous columns stay eligible.
+    excluded_semantic = {"identifier", "constant", "datetime"}
+    selected = [
+        col
+        for col in candidate_cols
+        if lookup.get(col, {}).get("type") not in excluded_semantic
+    ]
+    # Include a numeric target column first so its correlation with every
+    # feature is visible in the heatmap.
+    if target_column and target_column in df.columns:
+        if pd.api.types.is_numeric_dtype(df[target_column]):
+            selected = [col for col in selected if col != target_column]
+            selected = [target_column] + selected
+
+    if len(selected) < 2:
+        skipped.append(
+            {
+                "plot": None,
+                "reason": "Need at least two numeric columns for a correlation matrix.",
+            }
+        )
+    else:
+        if len(selected) > MAX_CORRELATION_COLUMNS:
+            # Keep the target first (if present) plus the columns with the
+            # highest mean absolute correlation with the target when numeric;
+            # never rank by raw variance, which depends on scale.
+            target_present = (
+                target_column
+                and target_column in selected
+                and pd.api.types.is_numeric_dtype(df[target_column])
             )
-            selected = list(variances.index[:MAX_CORRELATION_COLUMNS])
+            corr_df = df[selected].corr(numeric_only=True)
+            if target_present:
+                scores = corr_df[target_column].abs().drop(labels=[target_column])
+                keep_n = MAX_CORRELATION_COLUMNS - 1
+            else:
+                scores = corr_df.abs().sum(axis=1) / max(len(selected) - 1, 1)
+                keep_n = MAX_CORRELATION_COLUMNS
+            top = list(scores.sort_values(ascending=False).index[:keep_n])
+            selected = ([target_column] if target_present else []) + top
             skipped.append(
                 {
                     "plot": None,
                     "reason": (
                         f"Correlation heatmap capped at {MAX_CORRELATION_COLUMNS} "
-                        f"column(s); {len(numeric_cols) - MAX_CORRELATION_COLUMNS} "
+                        f"column(s); {len(candidate_cols) - MAX_CORRELATION_COLUMNS} "
                         f"more column(s) not included."
                     ),
                 }
@@ -729,13 +769,6 @@ def generate_plots(
             skipped.append(
                 {"plot": None, "reason": result.get("evidence", "correlation plot skipped.")}
             )
-    elif len(numeric_cols) == 1:
-        skipped.append(
-            {
-                "plot": None,
-                "reason": "Need at least two numeric columns for a correlation matrix.",
-            }
-        )
 
     # ── missing values combined bar chart ──
     missing_findings = [f for f in findings if f.get("check_name") == "missing_values"]
